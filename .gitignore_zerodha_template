@@ -1,0 +1,19 @@
+# Zerodha Adapter - Add these lines to your .gitignore
+
+# Zerodha API credentials (NEVER commit these!)
+zerodha_credentials.toml
+**/zerodha_credentials.toml
+.zerodha_credentials.toml
+
+# Zerodha logs and temporary files
+logs/zerodha_adapter.log
+logs/zerodha_*.log
+*.zerodha.log
+
+# Paper trading session data
+paper_trading_session_*.json
+zerodha_paper_*.data
+
+# Test results and reports
+zerodha_test_results_*.json
+zerodha_validation_report_*.html

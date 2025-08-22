@@ -1,0 +1,125 @@
+[package]
+name = "nautilus-zerodha"
+readme = "README.md"
+publish = false  # Do not publish to crates.io yet
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description.workspace = true
+categories.workspace = true
+keywords.workspace = true
+documentation.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lib]
+name = "nautilus_zerodha"
+crate-type = ["rlib", "cdylib"]
+
+[features]
+default = []
+extension-module = [
+  "nautilus-common/extension-module",
+  "nautilus-core/extension-module", 
+  "nautilus-model/extension-module",
+  "nautilus-network/extension-module",
+  "pyo3/extension-module",
+]
+python = [
+  "nautilus-common/python",
+  "nautilus-core/python",
+  "nautilus-model/python",
+  "nautilus-network/python",
+  "pyo3",
+  "pyo3-async-runtimes",
+]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+nautilus-common = { workspace = true }
+nautilus-core = { workspace = true }
+nautilus-model = { workspace = true }
+nautilus-network = { workspace = true }
+
+ahash = { workspace = true }
+anyhow = { workspace = true }
+async-stream = { workspace = true }
+base64 = { workspace = true }
+chrono = { workspace = true }
+dashmap = { workspace = true }
+derive_builder = { workspace = true }
+futures-util = { workspace = true }
+indexmap = { workspace = true }
+log = { workspace = true }
+pyo3 = { workspace = true, optional = true }
+pyo3-async-runtimes = { workspace = true, optional = true }
+reqwest = { workspace = true }
+aws-lc-rs = { workspace = true }
+rust_decimal = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_urlencoded = { workspace = true }
+strum = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+toml = "0.8"
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }  # Needed for example binaries
+ustr = { workspace = true }
+url = { workspace = true }
+sha2 = "0.10.8"
+hex = { workspace = true }
+urlencoding = "2.1"
+
+[dev-dependencies]
+nautilus-testkit = { workspace = true }
+criterion = { workspace = true }
+rstest = { workspace = true }
+tracing-test = { workspace = true }
+url = { workspace = true }
+
+[[bin]]
+name = "zerodha-http-instruments"
+path = "bin/http-instruments.rs"
+
+[[bin]]
+name = "zerodha-http-orders"
+path = "bin/http-orders.rs"
+
+[[bin]]
+name = "zerodha-ws-data"
+path = "bin/ws-data.rs"
+
+[[bin]]
+name = "zerodha-ws-orders"
+path = "bin/ws-orders.rs"
+
+[[bin]]
+name = "zerodha-execution-test"
+path = "bin/execution-test.rs"
+
+[[bin]]
+name = "zerodha-ws-live-test"
+path = "bin/ws-live-test.rs"
+
+[[bin]]
+name = "zerodha-paper-trading-test"
+path = "bin/paper-trading-test.rs"
+
+[[bin]]
+name = "zerodha-market-data-validator"
+path = "bin/market-data-validator.rs"
+
+[[bin]]
+name = "zerodha-config-test"
+path = "bin/config-test.rs"
+
+[[bin]]
+name = "zerodha-token-generator"
+path = "bin/zerodha-token-generator.rs"

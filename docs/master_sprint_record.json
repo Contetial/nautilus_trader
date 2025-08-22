@@ -1,0 +1,648 @@
+{
+  "project": "NautilusTrader Zerodha Integration",
+  "created": "2025-01-21",
+  "version": "1.0",
+  "description": "Comprehensive sprint planning for complete Zerodha broker integration with options trading capabilities",
+  
+  "sprints": {
+    "sprint_001": {
+      "name": "Core Trading Infrastructure",
+      "priority": "HIGH",
+      "estimated_days": 5,
+      "status": "READY",
+      "description": "Complete the basic trading loop - execution, positions, orders",
+      
+      "tasks": {
+        "task_001": {
+          "name": "Implement Execution Client",
+          "category": "execution",
+          "priority": "CRITICAL",
+          "estimated_hours": 16,
+          "status": "PENDING",
+          "dependencies": [],
+          "outcome": "Working LiveExecClient that can place, modify, cancel orders via Zerodha API",
+          "files": [
+            "nautilus_trader/adapters/zerodha/execution.py",
+            "crates/adapters/zerodha/src/execution/client.rs"
+          ],
+          "acceptance_criteria": [
+            "Place market orders with proper validation",
+            "Place limit orders with price/quantity controls",
+            "Cancel pending orders successfully",
+            "Modify order price/quantity",
+            "Handle order rejections gracefully",
+            "Real-time order status updates via WebSocket"
+          ]
+        },
+        
+        "task_002": {
+          "name": "Order State Management",
+          "category": "execution",
+          "priority": "HIGH",
+          "estimated_hours": 12,
+          "status": "PENDING",
+          "dependencies": ["task_001"],
+          "outcome": "Complete order lifecycle tracking from submission to fill/cancel",
+          "files": [
+            "crates/adapters/zerodha/src/types.rs",
+            "nautilus_trader/adapters/zerodha/execution.py"
+          ],
+          "acceptance_criteria": [
+            "Track order states: PENDING_SUBMIT -> SUBMITTED -> ACCEPTED -> FILLED",
+            "Handle partial fills correctly",
+            "Generate proper NautilusTrader events",
+            "Maintain order-to-trade mapping",
+            "Support bracket orders (SL/Target)"
+          ]
+        },
+        
+        "task_003": {
+          "name": "Position Tracking Integration",
+          "category": "portfolio",
+          "priority": "HIGH",
+          "estimated_hours": 10,
+          "status": "PENDING",
+          "dependencies": ["task_001"],
+          "outcome": "Real-time position updates synchronized with NautilusTrader portfolio",
+          "files": [
+            "nautilus_trader/adapters/zerodha/execution.py",
+            "crates/adapters/zerodha/src/http/client.rs"
+          ],
+          "acceptance_criteria": [
+            "Fetch positions from Zerodha API on startup",
+            "Update positions on order fills",
+            "Calculate unrealized P&L correctly",
+            "Handle position reconciliation",
+            "Support both equity and derivatives positions"
+          ]
+        },
+        
+        "task_004": {
+          "name": "Account Information Integration",
+          "category": "portfolio",
+          "priority": "MEDIUM",
+          "estimated_hours": 8,
+          "status": "PENDING",
+          "dependencies": ["task_003"],
+          "outcome": "Real-time account balance and margin information",
+          "files": [
+            "crates/adapters/zerodha/src/http/client.rs",
+            "nautilus_trader/adapters/zerodha/execution.py"
+          ],
+          "acceptance_criteria": [
+            "Fetch account balance and available margin",
+            "Calculate required margin for new orders",
+            "Handle margin calls and violations",
+            "Support multiple segments (equity, F&O, commodity)",
+            "Real-time balance updates on trades"
+          ]
+        }
+      }
+    },
+    
+    "sprint_002": {
+      "name": "Live Testing & Validation",
+      "priority": "HIGH", 
+      "estimated_days": 3,
+      "status": "READY",
+      "description": "Test real-time data feeds and validate all components with live market data",
+      
+      "tasks": {
+        "task_005": {
+          "name": "WebSocket Live Data Testing",
+          "category": "data",
+          "priority": "HIGH",
+          "estimated_hours": 8,
+          "status": "PENDING",
+          "dependencies": [],
+          "outcome": "Validated WebSocket client working with live NSE/BSE data",
+          "files": [
+            "crates/adapters/zerodha/bin/ws-live-test.rs",
+            "examples/live/zerodha_data_test.py"
+          ],
+          "acceptance_criteria": [
+            "Connect to live Zerodha WebSocket during market hours",
+            "Receive and parse tick data for 100+ instruments",
+            "Validate data accuracy against Zerodha web interface",
+            "Test reconnection during network issues",
+            "Monitor memory usage and performance"
+          ]
+        },
+        
+        "task_006": {
+          "name": "Options Chain Validation",
+          "category": "data",
+          "priority": "HIGH",
+          "estimated_hours": 6,
+          "status": "PENDING",
+          "dependencies": ["task_005"],
+          "outcome": "Accurate options chain loading and Greeks calculations",
+          "files": [
+            "nautilus_trader/adapters/zerodha/providers.py",
+            "examples/live/options_chain_test.py"
+          ],
+          "acceptance_criteria": [
+            "Load complete Nifty options chain for current month",
+            "Validate strike prices and expiry dates",
+            "Calculate Greeks for 50+ option contracts",
+            "Compare IV calculations with market data",
+            "Test options chain caching performance"
+          ]
+        },
+        
+        "task_007": {
+          "name": "Market Hours Integration Testing",
+          "category": "data",
+          "priority": "MEDIUM",
+          "estimated_hours": 4,
+          "status": "PENDING",
+          "dependencies": ["task_005"],
+          "outcome": "Proper handling of Indian market sessions and holidays",
+          "files": [
+            "nautilus_trader/adapters/zerodha/data.py",
+            "tests/integration/test_market_hours.py"
+          ],
+          "acceptance_criteria": [
+            "Correctly detect pre-open, regular, and post-market sessions",
+            "Handle weekend and holiday detection",
+            "Calculate next market open times accurately",
+            "Test timezone conversion between IST and UTC",
+            "Validate behavior during market holidays"
+          ]
+        },
+        
+        "task_008": {
+          "name": "End-to-End Integration Test",
+          "category": "integration",
+          "priority": "HIGH",
+          "estimated_hours": 10,
+          "status": "PENDING",
+          "dependencies": ["task_001", "task_005"],
+          "outcome": "Complete trading workflow from data to execution",
+          "files": [
+            "examples/live/zerodha_integration_test.py",
+            "tests/integration/test_full_workflow.py"
+          ],
+          "acceptance_criteria": [
+            "Subscribe to real-time data for test instruments",
+            "Place and execute small test orders",
+            "Verify position updates in real-time",
+            "Test order cancellation and modification",
+            "Monitor for 1+ hour of continuous operation"
+          ]
+        }
+      }
+    },
+    
+    "sprint_003": {
+      "name": "Advanced Options Strategies",
+      "priority": "MEDIUM",
+      "estimated_days": 7,
+      "status": "PLANNED",
+      "description": "Implement sophisticated options trading strategies with risk management",
+      
+      "tasks": {
+        "task_009": {
+          "name": "Iron Condor Strategy Implementation",
+          "category": "strategy",
+          "priority": "HIGH",
+          "estimated_hours": 20,
+          "status": "PENDING",
+          "dependencies": ["task_001", "task_006"],
+          "outcome": "Production-ready Iron Condor strategy with automated management",
+          "files": [
+            "examples/strategies/iron_condor_strategy.py",
+            "nautilus_trader/adapters/zerodha/strategies/iron_condor.py"
+          ],
+          "acceptance_criteria": [
+            "Identify optimal strike selection based on Greeks",
+            "Execute 4-leg option combo orders",
+            "Monitor profit/loss thresholds",
+            "Implement early exit conditions",
+            "Handle expiry day management",
+            "Risk management with position sizing"
+          ]
+        },
+        
+        "task_010": {
+          "name": "Volatility Trading Strategy",
+          "category": "strategy",
+          "priority": "HIGH",
+          "estimated_hours": 18,
+          "status": "PENDING",
+          "dependencies": ["task_006"],
+          "outcome": "IV-based trading strategy with dynamic hedging",
+          "files": [
+            "examples/strategies/volatility_strategy.py",
+            "nautilus_trader/adapters/zerodha/analytics/volatility.py"
+          ],
+          "acceptance_criteria": [
+            "Calculate historical vs implied volatility",
+            "Identify volatility trading opportunities", 
+            "Implement delta hedging for volatility positions",
+            "Monitor vega exposure limits",
+            "Handle volatility skew analysis",
+            "Automated portfolio rebalancing"
+          ]
+        },
+        
+        "task_011": {
+          "name": "Options Market Making Strategy",
+          "category": "strategy",
+          "priority": "MEDIUM",
+          "estimated_hours": 24,
+          "status": "PENDING",
+          "dependencies": ["task_001", "task_009"],
+          "outcome": "Automated options market making with inventory management",
+          "files": [
+            "examples/strategies/options_market_maker.py",
+            "nautilus_trader/adapters/zerodha/strategies/market_maker.py"
+          ],
+          "acceptance_criteria": [
+            "Quote bid/ask spreads for selected options",
+            "Manage inventory levels across strikes",
+            "Implement Greeks-based pricing models",
+            "Handle adverse selection protection",
+            "Monitor market impact and adjust",
+            "Profit target and stop-loss management"
+          ]
+        },
+        
+        "task_012": {
+          "name": "Multi-Strategy Portfolio Manager",
+          "category": "strategy",
+          "priority": "MEDIUM",
+          "estimated_hours": 16,
+          "status": "PENDING",
+          "dependencies": ["task_009", "task_010"],
+          "outcome": "Coordinate multiple strategies with unified risk management",
+          "files": [
+            "nautilus_trader/adapters/zerodha/portfolio/manager.py",
+            "examples/live/multi_strategy_portfolio.py"
+          ],
+          "acceptance_criteria": [
+            "Allocate capital across strategies",
+            "Monitor portfolio-level Greeks",
+            "Implement risk limits and controls",
+            "Handle strategy conflicts and dependencies",
+            "Generate consolidated performance reports",
+            "Emergency shutdown capabilities"
+          ]
+        }
+      }
+    },
+    
+    "sprint_004": {
+      "name": "Performance Optimization",
+      "priority": "MEDIUM",
+      "estimated_days": 4,
+      "status": "PLANNED",
+      "description": "Optimize for high-frequency trading and large portfolios",
+      
+      "tasks": {
+        "task_013": {
+          "name": "WebSocket Performance Optimization",
+          "category": "performance",
+          "priority": "HIGH",
+          "estimated_hours": 12,
+          "status": "PENDING",
+          "dependencies": ["task_005"],
+          "outcome": "Sub-millisecond latency for critical trading paths",
+          "files": [
+            "crates/adapters/zerodha/src/websocket/client.rs",
+            "benchmarks/zerodha_latency_test.rs"
+          ],
+          "acceptance_criteria": [
+            "Measure end-to-end tick-to-strategy latency",
+            "Optimize binary parsing performance",
+            "Implement zero-copy data structures",
+            "Benchmark against 10k+ ticks/second",
+            "Memory usage profiling and optimization",
+            "CPU usage optimization for multi-core"
+          ]
+        },
+        
+        "task_014": {
+          "name": "Greeks Calculation Optimization",
+          "category": "performance", 
+          "priority": "MEDIUM",
+          "estimated_hours": 10,
+          "status": "PENDING",
+          "dependencies": ["task_006"],
+          "outcome": "Real-time Greeks for 1000+ option positions",
+          "files": [
+            "nautilus_trader/adapters/zerodha/greeks.py",
+            "crates/adapters/zerodha/src/greeks.rs"
+          ],
+          "acceptance_criteria": [
+            "Vectorized Greeks calculations",
+            "Parallel processing for large portfolios",
+            "Incremental Greeks updates",
+            "Benchmark calculation speed",
+            "Memory-efficient Greeks storage",
+            "Approximate Greeks for ultra-fast updates"
+          ]
+        },
+        
+        "task_015": {
+          "name": "Database Performance Optimization",
+          "category": "performance",
+          "priority": "LOW",
+          "estimated_hours": 8,
+          "status": "PENDING",
+          "dependencies": ["task_001"],
+          "outcome": "Efficient storage and retrieval of trading data",
+          "files": [
+            "nautilus_trader/adapters/zerodha/persistence/",
+            "benchmarks/database_performance.py"
+          ],
+          "acceptance_criteria": [
+            "Optimize tick data storage schema",
+            "Implement efficient data compression",
+            "Fast historical data queries",
+            "Parallel data loading",
+            "Database connection pooling",
+            "Cache frequently accessed data"
+          ]
+        }
+      }
+    },
+    
+    "sprint_005": {
+      "name": "Risk Management & Compliance",
+      "priority": "HIGH",
+      "estimated_days": 5,
+      "status": "PLANNED", 
+      "description": "Comprehensive risk controls and regulatory compliance",
+      
+      "tasks": {
+        "task_016": {
+          "name": "Position Risk Controls",
+          "category": "risk",
+          "priority": "CRITICAL",
+          "estimated_hours": 14,
+          "status": "PENDING",
+          "dependencies": ["task_003"],
+          "outcome": "Real-time position and exposure monitoring with automatic limits",
+          "files": [
+            "nautilus_trader/adapters/zerodha/risk/position_limits.py",
+            "nautilus_trader/adapters/zerodha/risk/exposure_monitor.py"
+          ],
+          "acceptance_criteria": [
+            "Maximum position size limits per instrument",
+            "Portfolio concentration limits",
+            "Greeks exposure limits (delta, gamma, vega, theta)",
+            "Automatic position reduction on limit breach",
+            "Real-time risk reporting and alerts",
+            "Emergency liquidation procedures"
+          ]
+        },
+        
+        "task_017": {
+          "name": "Drawdown Protection",
+          "category": "risk",
+          "priority": "HIGH",
+          "estimated_hours": 10,
+          "status": "PENDING",
+          "dependencies": ["task_003"],
+          "outcome": "Automated drawdown monitoring with strategy shutdown",
+          "files": [
+            "nautilus_trader/adapters/zerodha/risk/drawdown_monitor.py",
+            "examples/risk/drawdown_protection.py"
+          ],
+          "acceptance_criteria": [
+            "Daily, weekly, monthly drawdown tracking",
+            "Configurable drawdown thresholds",
+            "Automatic strategy pause on breach",
+            "Position liquidation on severe drawdown",
+            "Recovery mode with reduced position sizes",
+            "Notification system for risk events"
+          ]
+        },
+        
+        "task_018": {
+          "name": "Margin Requirement Calculation",
+          "category": "risk",
+          "priority": "HIGH",
+          "estimated_hours": 12,
+          "status": "PENDING",
+          "dependencies": ["task_004"],
+          "outcome": "Accurate SPAN margin calculation for options strategies",
+          "files": [
+            "nautilus_trader/adapters/zerodha/margin/span_calculator.py",
+            "crates/adapters/zerodha/src/margin/mod.rs"
+          ],
+          "acceptance_criteria": [
+            "SPAN margin calculation for option combinations",
+            "Real-time margin utilization monitoring",
+            "Pre-trade margin validation",
+            "Margin optimization for complex strategies",
+            "Integration with NSE/BSE margin rules",
+            "Margin breach prevention and alerts"
+          ]
+        },
+        
+        "task_019": {
+          "name": "Compliance & Audit Trail",
+          "category": "compliance",
+          "priority": "MEDIUM",
+          "estimated_hours": 8,
+          "status": "PENDING", 
+          "dependencies": ["task_001"],
+          "outcome": "Complete audit trail for regulatory compliance",
+          "files": [
+            "nautilus_trader/adapters/zerodha/compliance/audit.py",
+            "nautilus_trader/adapters/zerodha/compliance/reporting.py"
+          ],
+          "acceptance_criteria": [
+            "Log all trading decisions and rationale",
+            "Maintain order and trade audit trail",
+            "Generate compliance reports",
+            "Risk limit breach documentation",
+            "Performance attribution tracking",
+            "Regulatory filing preparation"
+          ]
+        }
+      }
+    },
+    
+    "sprint_006": {
+      "name": "Multi-Broker & Advanced Features",
+      "priority": "LOW",
+      "estimated_days": 8,
+      "status": "FUTURE",
+      "description": "Extend to ICICI Direct and Kotak Neo brokers with advanced trading features",
+      
+      "tasks": {
+        "task_020": {
+          "name": "ICICI Direct Integration",
+          "category": "integration",
+          "priority": "MEDIUM",
+          "estimated_hours": 22,
+          "status": "PENDING",
+          "dependencies": ["task_008"],
+          "outcome": "Full ICICI Direct adapter following Zerodha patterns",
+          "files": [
+            "crates/adapters/icici_direct/",
+            "nautilus_trader/adapters/icici_direct/"
+          ],
+          "acceptance_criteria": [
+            "HTTP client for ICICI Direct Breeze API",
+            "WebSocket client for real-time data streaming",
+            "Order execution and position tracking",
+            "Options chain integration with NSE/BSE",
+            "Support for equity and derivatives trading",
+            "Unified broker abstraction layer"
+          ]
+        },
+        
+        "task_021": {
+          "name": "Kotak Neo Integration",
+          "category": "integration",
+          "priority": "MEDIUM",
+          "estimated_hours": 20,
+          "status": "PENDING",
+          "dependencies": ["task_020"],
+          "outcome": "Full Kotak Neo adapter following established broker patterns",
+          "files": [
+            "crates/adapters/kotak_neo/",
+            "nautilus_trader/adapters/kotak_neo/"
+          ],
+          "acceptance_criteria": [
+            "HTTP client for Kotak Neo API",
+            "WebSocket client for real-time market data",
+            "Order execution and position management",
+            "Options chain integration with derivatives",
+            "Support for equity, F&O, and currency segments",
+            "Unified broker abstraction layer compatibility"
+          ]
+        },
+        
+        "task_021b": {
+          "name": "Multi-Broker Arbitrage Strategy",
+          "category": "strategy",
+          "priority": "LOW",
+          "estimated_hours": 18,
+          "status": "PENDING",
+          "dependencies": ["task_020", "task_021"],
+          "outcome": "Automated arbitrage across Zerodha, ICICI Direct, and Kotak Neo",
+          "files": [
+            "examples/strategies/multi_broker_arbitrage.py",
+            "nautilus_trader/adapters/multi_broker/arbitrage_engine.py"
+          ],
+          "acceptance_criteria": [
+            "Real-time price comparison across all three brokers",
+            "Automated arbitrage opportunity detection",
+            "Simultaneous order placement across brokers",
+            "Risk management for cross-broker positions",
+            "Latency optimization for arbitrage execution",
+            "Profit calculation and performance reporting",
+            "Handle broker-specific execution differences"
+          ]
+        },
+        
+        "task_022": {
+          "name": "Historical Data Integration",
+          "category": "data",
+          "priority": "MEDIUM",
+          "estimated_hours": 12,
+          "status": "PENDING",
+          "dependencies": ["task_008"],
+          "outcome": "NSE/BSE historical data for backtesting",
+          "files": [
+            "nautilus_trader/adapters/zerodha/historical/",
+            "examples/backtest/nse_historical_test.py"
+          ],
+          "acceptance_criteria": [
+            "Download historical tick data",
+            "Import historical options data",
+            "Integration with NautilusTrader backtest engine",
+            "Data quality validation and cleaning",
+            "Efficient data storage and retrieval"
+          ]
+        },
+        
+        "task_023": {
+          "name": "Advanced Analytics Dashboard",
+          "category": "analytics",
+          "priority": "LOW",
+          "estimated_hours": 18,
+          "status": "PENDING",
+          "dependencies": ["task_012"],
+          "outcome": "Real-time trading dashboard with analytics",
+          "files": [
+            "nautilus_trader/adapters/zerodha/dashboard/",
+            "examples/analytics/trading_dashboard.py"
+          ],
+          "acceptance_criteria": [
+            "Real-time P&L and position monitoring",
+            "Greeks exposure visualization",
+            "Strategy performance analytics",
+            "Risk metrics and alerts",
+            "Trade execution analytics",
+            "Interactive charts and reporting"
+          ]
+        }
+      }
+    }
+  },
+  
+  "metrics": {
+    "total_tasks": 24,
+    "total_estimated_hours": 322,
+    "total_estimated_days": 34,
+    "critical_tasks": 2,
+    "high_priority_tasks": 11,
+    "medium_priority_tasks": 9,
+    "low_priority_tasks": 2
+  },
+  
+  "dependencies": {
+    "external": [
+      "Zerodha API access and documentation",
+      "ICICI Direct Breeze API access and documentation", 
+      "Kotak Neo API access and documentation",
+      "NSE/BSE market data feeds", 
+      "Indian market holiday calendar",
+      "SPAN margin calculation specifications"
+    ],
+    "internal": [
+      "NautilusTrader framework updates",
+      "Rust/Python integration testing",
+      "Performance benchmarking infrastructure",
+      "Compliance and audit requirements"
+    ]
+  },
+  
+  "risks": [
+    {
+      "risk": "API rate limiting from Zerodha",
+      "impact": "HIGH",
+      "mitigation": "Implement proper rate limiting and connection pooling"
+    },
+    {
+      "risk": "Market data feed interruptions",
+      "impact": "HIGH", 
+      "mitigation": "Redundant data sources and automatic reconnection"
+    },
+    {
+      "risk": "Regulatory changes in Indian markets",
+      "impact": "MEDIUM",
+      "mitigation": "Regular compliance review and flexible architecture"
+    },
+    {
+      "risk": "Performance degradation with large portfolios",
+      "impact": "MEDIUM",
+      "mitigation": "Early performance testing and optimization"
+    }
+  ],
+  
+  "success_criteria": [
+    "Successfully execute 1000+ trades per day",
+    "Maintain sub-second latency for critical paths",
+    "Handle 500+ simultaneous option positions",
+    "Achieve 99.9% uptime during market hours",
+    "Pass all regulatory compliance requirements",
+    "Demonstrate profitable strategy performance"
+  ]
+}
