@@ -18,5 +18,5 @@
 pub mod client;
 pub mod paper_trading;
 
-pub use client::{OrderModifyRequest, OrderRequest, ZerodhaExecutionClient};
+pub use client::{AccountHealthStatus, OrderModifyRequest, OrderRequest, ZerodhaExecutionClient};
 pub use paper_trading::{PaperTradingEngine, PaperTradingStats};

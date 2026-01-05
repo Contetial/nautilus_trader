@@ -283,7 +283,7 @@ impl Default for ZerodhaExecutionConfig {
             enable_validation: true,
             max_position_value: 1_000_000.0, // 10 Lakh INR
             enable_margin_check: true,
-            default_validity: crate::enums::Validity::Day,
+            default_validity: crate::enums::Validity::DAY,
             default_product_type: crate::enums::ProductType::MIS,
             paper_trading: false,
             paper_balance: 1_000_000.0, // 10 Lakh INR starting balance

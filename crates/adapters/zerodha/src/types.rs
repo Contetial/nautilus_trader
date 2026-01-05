@@ -366,7 +366,7 @@ mod tests {
 }
 
 /// Order status enumeration
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum ZerodhaOrderStatus {
     /// Order is open/pending
     #[serde(rename = "OPEN")]
@@ -388,6 +388,31 @@ pub enum ZerodhaOrderStatus {
     Pending,
 }
 
+impl From<crate::enums::OrderStatus> for ZerodhaOrderStatus {
+    fn from(status: crate::enums::OrderStatus) -> Self {
+        match status {
+            crate::enums::OrderStatus::OPEN => ZerodhaOrderStatus::Open,
+            crate::enums::OrderStatus::COMPLETE => ZerodhaOrderStatus::Complete,
+            crate::enums::OrderStatus::CANCELLED => ZerodhaOrderStatus::Cancelled,
+            crate::enums::OrderStatus::REJECTED => ZerodhaOrderStatus::Rejected,
+            crate::enums::OrderStatus::TriggerPending => ZerodhaOrderStatus::Trigger,
+        }
+    }
+}
+
+impl From<ZerodhaOrderStatus> for crate::enums::OrderStatus {
+    fn from(status: ZerodhaOrderStatus) -> Self {
+        match status {
+            ZerodhaOrderStatus::Open => crate::enums::OrderStatus::OPEN,
+            ZerodhaOrderStatus::Complete => crate::enums::OrderStatus::COMPLETE,
+            ZerodhaOrderStatus::Cancelled => crate::enums::OrderStatus::CANCELLED,
+            ZerodhaOrderStatus::Rejected => crate::enums::OrderStatus::REJECTED,
+            ZerodhaOrderStatus::Trigger => crate::enums::OrderStatus::TriggerPending,
+            ZerodhaOrderStatus::Pending => crate::enums::OrderStatus::OPEN, // Map pending to open
+        }
+    }
+}
+
 impl std::fmt::Display for ZerodhaOrderStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -401,56 +426,6 @@ impl std::fmt::Display for ZerodhaOrderStatus {
     }
 }
 
-/// Order information from Zerodha
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ZerodhaOrder {
-    /// Order ID from Zerodha
-    pub order_id: String,
-    /// Client-generated order ID
-    pub client_order_id: String,
-    /// Trading symbol
-    pub tradingsymbol: String,
-    /// Exchange
-    pub exchange: Exchange,
-    /// Transaction type (BUY/SELL)
-    pub transaction_type: String,
-    /// Order type
-    pub order_type: OrderType,
-    /// Product type
-    pub product: ProductType,
-    /// Validity
-    pub validity: Validity,
-    /// Order quantity
-    pub quantity: u32,
-    /// Order price (for limit orders)
-    pub price: Option<f64>,
-    /// Trigger price (for stop loss orders)
-    pub trigger_price: Option<f64>,
-    /// Disclosed quantity
-    pub disclosed_quantity: Option<u32>,
-    /// Order status
-    pub status: ZerodhaOrderStatus,
-    /// Filled quantity
-    pub filled_quantity: u32,
-    /// Pending quantity
-    pub pending_quantity: u32,
-    /// Average fill price
-    pub average_price: Option<f64>,
-    /// Placed by
-    pub placed_by: String,
-    /// Order placement timestamp
-    pub order_timestamp: DateTime<Utc>,
-    /// Exchange timestamp
-    pub exchange_timestamp: Option<DateTime<Utc>>,
-    /// Exchange order ID
-    pub exchange_order_id: Option<String>,
-    /// Parent order ID (for bracket/cover orders)
-    pub parent_order_id: Option<String>,
-    /// Status message
-    pub status_message: Option<String>,
-    /// Tag
-    pub tag: Option<String>,
-}
 
 /// Order response from API
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -562,3 +537,8 @@ pub struct ZerodhaAccountBalance {
     /// Last updated
     pub last_updated: chrono::DateTime<chrono::Utc>,
 }
+
+// Type aliases for backward compatibility and alternative naming
+pub type ZerodhaOHLC = OHLC;
+pub type ZerodhaDepth = MarketDepth;
+pub type ZerodhaDepthItem = DepthItem;

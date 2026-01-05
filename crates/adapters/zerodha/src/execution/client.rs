@@ -17,12 +17,13 @@
 
 use crate::{
     config::ZerodhaExecutionConfig,
-    enums::{Exchange, OrderType, ProductType, Validity},
+    enums::{Exchange, OrderStatus, OrderType, ProductType, TransactionType, Validity},
     error::{ZerodhaError, ZerodhaResult},
     execution::paper_trading::PaperTradingEngine,
     http::ZerodhaHttpClient,
-    types::{ZerodhaOrder, ZerodhaOrderResponse, ZerodhaPosition, ZerodhaOrderStatus},
+    types::{ZerodhaOrder, ZerodhaOrderResponse, ZerodhaPosition},
 };
+use rust_decimal::{Decimal, prelude::FromPrimitive};
 use std::{
     collections::HashMap,
     sync::{
@@ -31,7 +32,7 @@ use std::{
     },
 };
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 /// Execution client for Zerodha order management
 #[derive(Debug)]
@@ -121,67 +122,77 @@ impl ZerodhaExecutionClient {
         // Generate client order ID
         let client_order_id = self.generate_client_order_id();
         
-        // Prepare order parameters
-        let mut params = HashMap::new();
-        params.insert("tradingsymbol".to_string(), request.tradingsymbol.clone());
-        params.insert("exchange".to_string(), request.exchange.to_string());
-        params.insert("transaction_type".to_string(), request.transaction_type.clone());
-        params.insert("order_type".to_string(), request.order_type.to_string());
-        params.insert("product".to_string(), request.product.to_string());
-        params.insert("validity".to_string(), request.validity.to_string());
-        params.insert("quantity".to_string(), request.quantity.to_string());
-        params.insert("tag".to_string(), client_order_id.clone());
+        // Convert f64 prices to Decimal
+        let price_decimal = request.price.map(|p| Decimal::from_f64(p).unwrap_or_default());
+        let trigger_price_decimal = request.trigger_price.map(|p| Decimal::from_f64(p).unwrap_or_default());
         
-        if let Some(price) = request.price {
-            params.insert("price".to_string(), price.to_string());
-        }
-        
-        if let Some(trigger_price) = request.trigger_price {
-            params.insert("trigger_price".to_string(), trigger_price.to_string());
-        }
-        
-        if let Some(disclosed_quantity) = request.disclosed_quantity {
-            params.insert("disclosed_quantity".to_string(), disclosed_quantity.to_string());
-        }
+        // Parse transaction type
+        let transaction_type = match request.transaction_type.as_str() {
+            "BUY" => TransactionType::BUY,
+            "SELL" => TransactionType::SELL,
+            _ => return Err(ZerodhaError::validation_error(format!("Invalid transaction type: {}", request.transaction_type))),
+        };
         
         // Place order via HTTP API
-        let response = self.http_client.place_order(params).await?;
+        let response = self.http_client.place_order(
+            request.exchange,
+            &request.tradingsymbol,
+            transaction_type,
+            request.quantity,
+            request.product,
+            request.order_type,
+            price_decimal,
+            trigger_price_decimal,
+            Some(request.validity),
+            request.disclosed_quantity,
+            Some(&client_order_id),
+        ).await?;
         
         // Create order object for tracking
         let order = ZerodhaOrder {
-            order_id: response.order_id.clone(),
-            client_order_id: client_order_id.clone(),
-            tradingsymbol: request.tradingsymbol.clone(),
-            exchange: request.exchange,
-            transaction_type: request.transaction_type.clone(),
-            order_type: request.order_type,
-            product: request.product,
-            validity: request.validity,
-            quantity: request.quantity,
-            price: request.price,
-            trigger_price: request.trigger_price,
-            disclosed_quantity: request.disclosed_quantity,
-            status: ZerodhaOrderStatus::Open,
-            filled_quantity: 0,
-            pending_quantity: request.quantity,
-            average_price: None,
+            account_id: "USER123".to_string(), // Placeholder account ID
             placed_by: "API".to_string(),
-            order_timestamp: chrono::Utc::now(),
-            exchange_timestamp: None,
+            order_id: response.clone(),
             exchange_order_id: None,
             parent_order_id: None,
+            status: OrderStatus::OPEN,
             status_message: None,
+            order_timestamp: chrono::Utc::now(),
+            exchange_timestamp: None,
+            variety: "regular".to_string(),
+            exchange: request.exchange,
+            tradingsymbol: request.tradingsymbol.clone(),
+            instrument_token: 0, // Will be populated later
+            order_type: request.order_type,
+            transaction_type: transaction_type,
+            validity: request.validity,
+            product: request.product,
+            quantity: request.quantity,
+            disclosed_quantity: request.disclosed_quantity,
+            price: price_decimal.unwrap_or_default(),
+            trigger_price: trigger_price_decimal,
+            average_price: None,
+            filled_quantity: 0,
+            pending_quantity: request.quantity,
+            cancelled_quantity: 0,
+            market_protection: None,
             tag: Some(client_order_id.clone()),
         };
         
         // Store order in local cache
         {
             let mut orders = self.orders.write().await;
-            orders.insert(response.order_id.clone(), order);
+            orders.insert(response.clone(), order);
         }
         
-        info!("✅ Order placed successfully: {}", response.order_id);
-        Ok(response)
+        info!("✅ Order placed successfully: {}", response);
+        
+        // Construct proper response
+        let order_response = ZerodhaOrderResponse {
+            order_id: response,
+        };
+        
+        Ok(order_response)
     }
     
     /// Modify an existing order
@@ -245,10 +256,10 @@ impl ZerodhaExecutionClient {
                     order.pending_quantity = quantity.saturating_sub(order.filled_quantity);
                 }
                 if let Some(price) = request.price {
-                    order.price = Some(price);
+                    order.price = Decimal::from_f64(price).unwrap_or_default();
                 }
                 if let Some(trigger_price) = request.trigger_price {
-                    order.trigger_price = Some(trigger_price);
+                    order.trigger_price = Some(Decimal::from_f64(trigger_price).unwrap_or_default());
                 }
                 if let Some(order_type) = request.order_type {
                     order.order_type = order_type;
@@ -295,7 +306,7 @@ impl ZerodhaExecutionClient {
         {
             let mut orders = self.orders.write().await;
             if let Some(order) = orders.get_mut(order_id) {
-                order.status = ZerodhaOrderStatus::Cancelled;
+                order.status = OrderStatus::CANCELLED;
                 order.pending_quantity = 0;
             }
         }
@@ -326,66 +337,11 @@ impl ZerodhaExecutionClient {
         }
     }
     
-    /// Get all orders
-    pub async fn get_orders(&self) -> ZerodhaResult<Vec<ZerodhaOrder>> {
-        // Fetch latest orders from API
-        let api_orders = self.http_client.get_orders().await?;
-        
-        // Update local cache
-        {
-            let mut orders = self.orders.write().await;
-            for order in &api_orders {
-                orders.insert(order.order_id.clone(), order.clone());
-            }
-        }
-        
-        Ok(api_orders)
-    }
-    
     /// Get order history
     pub async fn get_order_history(&self, order_id: &str) -> ZerodhaResult<Vec<ZerodhaOrder>> {
         self.http_client.get_order_history(order_id).await
     }
     
-    /// Get all positions
-    pub async fn get_positions(&self) -> ZerodhaResult<HashMap<String, Vec<ZerodhaPosition>>> {
-        let positions = self.http_client.get_positions().await?;
-        
-        // Update local cache with net positions
-        {
-            let mut local_positions = self.positions.write().await;
-            local_positions.clear();
-            
-            for (_, position_list) in &positions {
-                for position in position_list {
-                    if position.quantity != 0 {
-                        local_positions.insert(
-                            format!("{}:{}", position.tradingsymbol, position.exchange),
-                            position.clone()
-                        );
-                    }
-                }
-            }
-        }
-        
-        Ok(positions)
-    }
-    
-    /// Get account balance and margin information
-    pub async fn get_account_info(&self) -> ZerodhaResult<(f64, f64)> {
-        let margins = self.http_client.get_margins().await?;
-        
-        let balance = margins.available_cash;
-        let available_margin = margins.available.net;
-        
-        // Update local cache
-        {
-            *self.account_balance.write().await = balance;
-            *self.available_margin.write().await = available_margin;
-        }
-        
-        Ok((balance, available_margin))
-    }
     
     /// Validate order request before placement
     async fn validate_order_request(&self, request: &OrderRequest) -> ZerodhaResult<()> {
@@ -399,12 +355,12 @@ impl ZerodhaExecutionClient {
         }
         
         // Validate price for limit orders
-        if matches!(request.order_type, OrderType::Limit) && request.price.is_none() {
+        if matches!(request.order_type, OrderType::LIMIT) && request.price.is_none() {
             return Err(ZerodhaError::validation_error("Price required for limit orders"));
         }
         
         // Validate trigger price for SL orders
-        if matches!(request.order_type, OrderType::StopLoss | OrderType::StopLossMarket) 
+        if matches!(request.order_type, OrderType::SL | OrderType::SLM) 
             && request.trigger_price.is_none() {
             return Err(ZerodhaError::validation_error("Trigger price required for stop loss orders"));
         }
@@ -427,16 +383,15 @@ impl ZerodhaExecutionClient {
     }
     
     /// Check if order can be modified
-    fn is_order_modifiable(&self, status: &ZerodhaOrderStatus) -> bool {
-        matches!(status, ZerodhaOrderStatus::Open | ZerodhaOrderStatus::Trigger)
+    fn is_order_modifiable(&self, status: &OrderStatus) -> bool {
+        matches!(status, OrderStatus::OPEN | OrderStatus::TriggerPending)
     }
     
     /// Check if order can be cancelled
-    fn is_order_cancellable(&self, status: &ZerodhaOrderStatus) -> bool {
+    fn is_order_cancellable(&self, status: &OrderStatus) -> bool {
         matches!(status, 
-                 ZerodhaOrderStatus::Open | 
-                 ZerodhaOrderStatus::Trigger |
-                 ZerodhaOrderStatus::Pending)
+                 OrderStatus::OPEN | 
+                 OrderStatus::TriggerPending)
     }
     
     /// Generate unique client order ID
@@ -568,6 +523,8 @@ impl ZerodhaExecutionClient {
             ProductType::MIS => order_value * 0.2,  // 20% for intraday
             ProductType::CNC => order_value,        // 100% for delivery
             ProductType::NRML => order_value * 0.5, // 50% for normal
+            ProductType::BO => order_value * 0.3,   // 30% for bracket orders
+            ProductType::CO => order_value * 0.3,   // 30% for cover orders
         };
         
         let available = margins.available.net;
@@ -624,7 +581,7 @@ impl ZerodhaExecutionClient {
             let mut result = HashMap::new();
             // Group by exchange for compatibility
             for position in positions {
-                result.entry(position.exchange.clone()).or_insert_with(Vec::new).push(position);
+                result.entry(position.exchange.to_string()).or_insert_with(Vec::new).push(position);
             }
             Ok(result)
         } else {
@@ -694,17 +651,16 @@ mod tests {
         let client = ZerodhaExecutionClient::new(config, http_client);
         
         // Test modifiable statuses
-        assert!(client.is_order_modifiable(&ZerodhaOrderStatus::Open));
-        assert!(client.is_order_modifiable(&ZerodhaOrderStatus::Trigger));
-        assert!(!client.is_order_modifiable(&ZerodhaOrderStatus::Complete));
-        assert!(!client.is_order_modifiable(&ZerodhaOrderStatus::Cancelled));
+        assert!(client.is_order_modifiable(&OrderStatus::OPEN));
+        assert!(client.is_order_modifiable(&OrderStatus::TriggerPending));
+        assert!(!client.is_order_modifiable(&OrderStatus::COMPLETE));
+        assert!(!client.is_order_modifiable(&OrderStatus::CANCELLED));
         
         // Test cancellable statuses
-        assert!(client.is_order_cancellable(&ZerodhaOrderStatus::Open));
-        assert!(client.is_order_cancellable(&ZerodhaOrderStatus::Trigger));
-        assert!(client.is_order_cancellable(&ZerodhaOrderStatus::Pending));
-        assert!(!client.is_order_cancellable(&ZerodhaOrderStatus::Complete));
-        assert!(!client.is_order_cancellable(&ZerodhaOrderStatus::Cancelled));
+        assert!(client.is_order_cancellable(&OrderStatus::OPEN));
+        assert!(client.is_order_cancellable(&OrderStatus::TriggerPending));
+        assert!(!client.is_order_cancellable(&OrderStatus::COMPLETE));
+        assert!(!client.is_order_cancellable(&OrderStatus::CANCELLED));
     }
     
     #[test]

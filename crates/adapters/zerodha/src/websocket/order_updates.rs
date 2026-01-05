@@ -16,13 +16,16 @@
 //! Order status update handling for Zerodha WebSocket.
 
 use crate::{
+    enums::{Exchange, OrderStatus, OrderType, Product, TransactionType, Validity},
     error::{ZerodhaError, ZerodhaResult},
     types::{ZerodhaOrder, ZerodhaOrderStatus},
 };
+use chrono::{DateTime, Utc};
+use rust_decimal::{Decimal, prelude::{FromPrimitive, ToPrimitive}};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 /// Order update event from Zerodha WebSocket
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,18 +135,18 @@ impl ZerodhaOrderStatusManager {
     pub fn update_order_status(&mut self, order_id: &str, status: ZerodhaOrderStatus) -> ZerodhaResult<()> {
         if let Some(order) = self.orders.get_mut(order_id) {
             let old_status = order.status;
-            order.status = status;
+            order.status = status.into();
             
             info!("🔄 Order {} status: {:?} -> {:?}", order_id, old_status, status);
             
             // Send update notification
             let update = ZerodhaOrderUpdate {
                 order_id: order_id.to_string(),
-                status,
+                status: order.status.into(),
                 status_message: None,
                 filled_quantity: order.filled_quantity,
                 pending_quantity: order.pending_quantity,
-                average_price: order.average_price,
+                average_price: order.average_price.map(|p| p.to_f64().unwrap_or_default()),
                 exchange_timestamp: None,
                 checksum: None,
             };
@@ -168,11 +171,11 @@ impl ZerodhaOrderStatusManager {
         if let Some(order) = self.orders.get_mut(order_id) {
             order.filled_quantity += filled_quantity;
             order.pending_quantity = order.quantity.saturating_sub(order.filled_quantity);
-            order.average_price = Some(average_price);
+            order.average_price = Some(Decimal::from_f64(average_price).unwrap_or_default());
             
             // Update status based on fill
             if order.pending_quantity == 0 {
-                order.status = ZerodhaOrderStatus::Complete;
+                order.status = OrderStatus::COMPLETE;
                 info!("✅ Order {} completely filled: {} @ ₹{:.2}", 
                       order_id, order.filled_quantity, average_price);
             } else {
@@ -183,11 +186,11 @@ impl ZerodhaOrderStatusManager {
             // Send update notification
             let update = ZerodhaOrderUpdate {
                 order_id: order_id.to_string(),
-                status: order.status,
+                status: order.status.into(),
                 status_message: None,
                 filled_quantity: order.filled_quantity,
                 pending_quantity: order.pending_quantity,
-                average_price: order.average_price,
+                average_price: order.average_price.map(|p| p.to_f64().unwrap_or_default()),
                 exchange_timestamp: None,
                 checksum: None,
             };
@@ -228,10 +231,10 @@ impl ZerodhaOrderStatusManager {
         
         // Update order if we're tracking it
         if let Some(order) = self.orders.get_mut(&postback.order_id) {
-            order.status = status;
+            order.status = status.into();
             order.filled_quantity = postback.filled_quantity;
             order.pending_quantity = postback.pending_quantity;
-            order.average_price = postback.average_price;
+            order.average_price = postback.average_price.map(|p| Decimal::from_f64(p).unwrap_or_default());
             
             if let Some(exchange_order_id) = &postback.exchange_order_id {
                 order.exchange_order_id = Some(exchange_order_id.clone());
@@ -257,29 +260,29 @@ impl ZerodhaOrderStatusManager {
         use chrono::Utc;
         
         // Parse enums from strings
-        let exchange = postback.exchange.parse::<Exchange>()
+        let _exchange = postback.exchange.parse::<Exchange>()
             .map_err(|_| ZerodhaError::parse_error(&format!("Invalid exchange: {}", postback.exchange)))?;
         
-        let order_type = match postback.order_type.as_str() {
-            "MARKET" => OrderType::Market,
-            "LIMIT" => OrderType::Limit,
-            "SL" => OrderType::StopLoss,
-            "SL-M" => OrderType::StopLossMarket,
-            _ => OrderType::Limit,
+        let _order_type = match postback.order_type.as_str() {
+            "MARKET" => OrderType::MARKET,
+            "LIMIT" => OrderType::LIMIT,
+            "SL" => OrderType::SL,
+            "SL-M" => OrderType::SLM,
+            _ => OrderType::LIMIT,
         };
         
-        let product = match postback.product.as_str() {
-            "MIS" => ProductType::MIS,
-            "CNC" => ProductType::CNC,
-            "NRML" => ProductType::NRML,
-            _ => ProductType::MIS,
+        let _product = match postback.product.as_str() {
+            "MIS" => Product::MIS,
+            "CNC" => Product::CNC,
+            "NRML" => Product::NRML,
+            _ => Product::MIS,
         };
         
-        let validity = match postback.validity.as_str() {
-            "DAY" => Validity::Day,
+        let _validity = match postback.validity.as_str() {
+            "DAY" => Validity::DAY,
             "IOC" => Validity::IOC,
-            "GTT" => Validity::GTT,
-            _ => Validity::Day,
+            "TTL" => Validity::TTL,
+            _ => Validity::DAY,
         };
         
         let status = match postback.status.as_str() {
@@ -293,28 +296,32 @@ impl ZerodhaOrderStatusManager {
         };
         
         let order = ZerodhaOrder {
-            order_id: postback.order_id.clone(),
-            client_order_id: postback.tag.unwrap_or_else(|| postback.order_id.clone()),
-            tradingsymbol: postback.tradingsymbol,
-            exchange,
-            transaction_type: postback.transaction_type,
-            order_type,
-            product,
-            validity,
-            quantity: postback.quantity,
-            price: postback.price,
-            trigger_price: postback.trigger_price,
-            disclosed_quantity: None,
-            status,
-            filled_quantity: postback.filled_quantity,
-            pending_quantity: postback.pending_quantity,
-            average_price: postback.average_price,
+            account_id: "WS_ACCOUNT".to_string(),
             placed_by: postback.user_id,
-            order_timestamp: Utc::now(),
-            exchange_timestamp: None,
+            order_id: postback.order_id.clone(),
             exchange_order_id: postback.exchange_order_id,
             parent_order_id: None,
+            status: status.into(),
             status_message: postback.status_message,
+            order_timestamp: Utc::now(),
+            exchange_timestamp: None,
+            variety: "regular".to_string(),
+            exchange: Exchange::NSE, // Default to NSE
+            tradingsymbol: postback.tradingsymbol,
+            instrument_token: 0, // Default
+            order_type: OrderType::LIMIT, // Default
+            transaction_type: TransactionType::BUY, // Will be parsed later
+            validity: Validity::DAY, // Default
+            product: Product::CNC, // Default
+            quantity: postback.quantity,
+            disclosed_quantity: None,
+            price: postback.price.map(|p| Decimal::from_f64(p).unwrap_or_default()).unwrap_or_default(),
+            trigger_price: postback.trigger_price.map(|p| Decimal::from_f64(p).unwrap_or_default()),
+            average_price: postback.average_price.map(|p| Decimal::from_f64(p).unwrap_or_default()),
+            filled_quantity: postback.filled_quantity,
+            pending_quantity: postback.pending_quantity,
+            cancelled_quantity: 0,
+            market_protection: None,
             tag: postback.tag,
         };
         
@@ -347,7 +354,7 @@ impl ZerodhaOrderStatusManager {
     /// Get orders by status
     pub fn get_orders_by_status(&self, status: ZerodhaOrderStatus) -> Vec<&ZerodhaOrder> {
         self.orders.values()
-            .filter(|order| order.status == status)
+            .filter(|order| ZerodhaOrderStatus::from(order.status) == status)
             .collect()
     }
     
@@ -356,7 +363,7 @@ impl ZerodhaOrderStatusManager {
         let before_count = self.orders.len();
         
         self.orders.retain(|_, order| {
-            !matches!(order.status, ZerodhaOrderStatus::Complete | ZerodhaOrderStatus::Cancelled | ZerodhaOrderStatus::Rejected)
+            !matches!(order.status, OrderStatus::COMPLETE | OrderStatus::CANCELLED | OrderStatus::REJECTED)
         });
         
         let after_count = self.orders.len();
@@ -370,7 +377,7 @@ impl ZerodhaOrderStatusManager {
         let mut stats = HashMap::new();
         
         for order in self.orders.values() {
-            *stats.entry(order.status).or_insert(0) += 1;
+            *stats.entry(order.status.into()).or_insert(0) += 1;
         }
         
         stats
@@ -396,9 +403,9 @@ mod tests {
             tradingsymbol: "SBIN".to_string(),
             exchange: Exchange::NSE,
             transaction_type: "BUY".to_string(),
-            order_type: OrderType::Limit,
+            order_type: OrderType::LIMIT,
             product: ProductType::MIS,
-            validity: Validity::Day,
+            validity: Validity::DAY,
             quantity: 100,
             price: Some(500.0),
             trigger_price: None,

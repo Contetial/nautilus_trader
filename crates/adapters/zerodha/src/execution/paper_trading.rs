@@ -20,19 +20,20 @@
 
 use crate::{
     config::ZerodhaExecutionConfig,
+    enums::{Exchange, OrderStatus, OrderType, Product, TransactionType},
     error::{ZerodhaError, ZerodhaResult},
     execution::{OrderRequest, OrderModifyRequest},
-    types::{ZerodhaOrder, ZerodhaOrderResponse, ZerodhaOrderStatus, ZerodhaPosition},
-    enums::{OrderType, ProductType},
+    types::{ZerodhaOrder, ZerodhaOrderResponse, ZerodhaPosition},
 };
-use chrono::{DateTime, Utc};
+use chrono::Utc;
+use rust_decimal::{Decimal, prelude::{FromPrimitive, ToPrimitive}};
 use std::{
     collections::HashMap,
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
 use tokio::time::{sleep, Instant};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// Paper trading engine that simulates order execution
 #[derive(Debug)]
@@ -117,7 +118,13 @@ impl PaperTradingEngine {
         for position in self.positions.values_mut() {
             if position.symbol == symbol {
                 position.last_price = price;
-                position.unrealized_pnl = self.calculate_unrealized_pnl(position);
+                // Calculate unrealized P&L inline to avoid borrowing conflict
+                let pnl_per_share = if position.quantity > 0 {
+                    position.last_price - position.average_price  // Long position
+                } else {
+                    position.average_price - position.last_price  // Short position
+                };
+                position.unrealized_pnl = pnl_per_share * position.quantity.abs() as f64;
             }
         }
     }
@@ -133,35 +140,46 @@ impl PaperTradingEngine {
         // Generate order ID
         let order_id = self.generate_order_id();
         
+        // Parse transaction type
+        let transaction_type = match request.transaction_type.as_str() {
+            "BUY" => TransactionType::BUY,
+            "SELL" => TransactionType::SELL,
+            _ => return Err(ZerodhaError::validation_error(format!("Invalid transaction type: {}", request.transaction_type))),
+        };
+        
         // Create paper order
         let order = ZerodhaOrder {
-            order_id: order_id.clone(),
-            client_order_id: request.tag.unwrap_or_else(|| format!("PAPER_{}", order_id)),
-            tradingsymbol: request.tradingsymbol.clone(),
-            exchange: request.exchange,
-            transaction_type: request.transaction_type.clone(),
-            order_type: request.order_type.unwrap_or(OrderType::Limit),
-            product: request.product.unwrap_or(ProductType::MIS),
-            validity: request.validity.unwrap_or(crate::enums::Validity::Day),
-            quantity: request.quantity,
-            price: request.price,
-            trigger_price: request.trigger_price,
-            disclosed_quantity: request.disclosed_quantity,
-            status: ZerodhaOrderStatus::Open,
-            filled_quantity: 0,
-            pending_quantity: request.quantity,
-            average_price: None,
+            account_id: "PAPER123".to_string(),
             placed_by: "PAPER_TRADER".to_string(),
-            order_timestamp: Utc::now(),
-            exchange_timestamp: None,
+            order_id: order_id.clone(),
             exchange_order_id: Some(format!("EX_{}", order_id)),
             parent_order_id: None,
+            status: OrderStatus::OPEN,
             status_message: Some("Order placed in paper trading mode".to_string()),
+            order_timestamp: Utc::now(),
+            exchange_timestamp: None,
+            variety: "regular".to_string(),
+            exchange: request.exchange,
+            tradingsymbol: request.tradingsymbol.clone(),
+            instrument_token: 0,
+            order_type: request.order_type,
+            transaction_type: transaction_type,
+            validity: request.validity,
+            product: request.product,
+            quantity: request.quantity,
+            disclosed_quantity: request.disclosed_quantity,
+            price: Decimal::from_f64(request.price.unwrap_or(0.0)).unwrap_or_default(),
+            trigger_price: request.trigger_price.map(|p| Decimal::from_f64(p).unwrap_or_default()),
+            average_price: None,
+            filled_quantity: 0,
+            pending_quantity: request.quantity,
+            cancelled_quantity: 0,
+            market_protection: None,
             tag: request.tag,
         };
         
         // Reserve margin for buy orders
-        if request.transaction_type == "BUY" {
+        if transaction_type == TransactionType::BUY {
             let required_margin = self.calculate_required_margin(&order)?;
             if required_margin > self.available_margin {
                 return Err(ZerodhaError::validation_error(&format!(
@@ -194,8 +212,6 @@ impl PaperTradingEngine {
         
         Ok(ZerodhaOrderResponse {
             order_id,
-            status: "success".to_string(),
-            message: "Paper order placed successfully".to_string(),
         })
     }
     
@@ -207,7 +223,7 @@ impl PaperTradingEngine {
             .ok_or_else(|| ZerodhaError::validation_error("Order not found"))?;
         
         // Check if order can be modified
-        if !matches!(order.order.status, ZerodhaOrderStatus::Open | ZerodhaOrderStatus::Trigger) {
+        if !matches!(order.order.status, OrderStatus::OPEN | OrderStatus::TriggerPending) {
             return Err(ZerodhaError::validation_error("Order cannot be modified"));
         }
         
@@ -218,11 +234,11 @@ impl PaperTradingEngine {
         }
         
         if let Some(price) = request.price {
-            order.order.price = Some(price);
+            order.order.price = Decimal::from_f64(price).unwrap_or_default();
         }
         
         if let Some(trigger_price) = request.trigger_price {
-            order.order.trigger_price = Some(trigger_price);
+            order.order.trigger_price = Some(Decimal::from_f64(trigger_price).unwrap_or_default());
         }
         
         // Try execution again with new parameters
@@ -230,8 +246,6 @@ impl PaperTradingEngine {
         
         Ok(ZerodhaOrderResponse {
             order_id: request.order_id,
-            status: "success".to_string(),
-            message: "Paper order modified successfully".to_string(),
         })
     }
     
@@ -239,29 +253,42 @@ impl PaperTradingEngine {
     pub async fn cancel_order(&mut self, order_id: &str) -> ZerodhaResult<ZerodhaOrderResponse> {
         info!("❌ Cancelling paper order: {}", order_id);
         
+        // First get the order info we need for margin calculation
+        let (should_release_margin, required_margin) = {
+            let order = self.orders.get(order_id)
+                .ok_or_else(|| ZerodhaError::validation_error("Order not found"))?;
+            
+            // Check if order can be cancelled
+            if matches!(order.order.status, OrderStatus::COMPLETE | OrderStatus::CANCELLED) {
+                return Err(ZerodhaError::validation_error("Order cannot be cancelled"));
+            }
+            
+            let should_release = order.order.transaction_type == TransactionType::BUY && order.order.filled_quantity == 0;
+            let margin = if should_release {
+                self.calculate_required_margin(&order.order)?
+            } else {
+                0.0
+            };
+            
+            (should_release, margin)
+        };
+        
+        // Release reserved margin
+        if should_release_margin {
+            self.available_margin += required_margin;
+        }
+        
+        // Now get mutable access to update order status
         let order = self.orders.get_mut(order_id)
             .ok_or_else(|| ZerodhaError::validation_error("Order not found"))?;
         
-        // Check if order can be cancelled
-        if matches!(order.order.status, ZerodhaOrderStatus::Complete | ZerodhaOrderStatus::Cancelled) {
-            return Err(ZerodhaError::validation_error("Order cannot be cancelled"));
-        }
-        
-        // Release reserved margin
-        if order.order.transaction_type == "BUY" && order.order.filled_quantity == 0 {
-            let reserved_margin = self.calculate_required_margin(&order.order)?;
-            self.available_margin += reserved_margin;
-        }
-        
         // Update order status
-        order.order.status = ZerodhaOrderStatus::Cancelled;
+        order.order.status = OrderStatus::CANCELLED;
         order.order.pending_quantity = 0;
         order.order.status_message = Some("Order cancelled in paper trading mode".to_string());
         
         Ok(ZerodhaOrderResponse {
             order_id: order_id.to_string(),
-            status: "success".to_string(),
-            message: "Paper order cancelled successfully".to_string(),
         })
     }
     
@@ -280,29 +307,25 @@ impl PaperTradingEngine {
             .copied()
             .unwrap_or_else(|| {
                 // If no market price available, simulate one based on order price
-                order.price.unwrap_or(100.0) * (1.0 + rand::random::<f64>() * 0.02 - 0.01)
+                order.price.to_f64().unwrap_or(100.0) * (1.0 + rand::random::<f64>() * 0.02 - 0.01)
             });
         
         // Check execution conditions
         let should_execute = match order.order_type {
-            OrderType::Market => true, // Market orders execute immediately
-            OrderType::Limit => {
-                if let Some(limit_price) = order.price {
-                    match order.transaction_type.as_str() {
-                        "BUY" => market_price <= limit_price,  // Buy if market <= limit
-                        "SELL" => market_price >= limit_price, // Sell if market >= limit
-                        _ => false,
-                    }
-                } else {
-                    false
+            OrderType::MARKET => true, // Market orders execute immediately
+            OrderType::LIMIT => {
+                let limit_price = order.price.to_f64().unwrap_or(0.0);
+                match order.transaction_type {
+                    TransactionType::BUY => market_price <= limit_price,  // Buy if market <= limit
+                    TransactionType::SELL => market_price >= limit_price, // Sell if market >= limit
                 }
             },
-            OrderType::StopLoss | OrderType::StopLossMarket => {
+            OrderType::SL | OrderType::SLM => {
                 if let Some(trigger_price) = order.trigger_price {
-                    match order.transaction_type.as_str() {
-                        "BUY" => market_price >= trigger_price,  // Buy stop triggered
-                        "SELL" => market_price <= trigger_price, // Sell stop triggered
-                        _ => false,
+                    let trigger_f64 = trigger_price.to_f64().unwrap_or(0.0);
+                    match order.transaction_type {
+                        TransactionType::BUY => market_price >= trigger_f64,  // Buy stop triggered
+                        TransactionType::SELL => market_price <= trigger_f64, // Sell stop triggered
                     }
                 } else {
                     false
@@ -331,8 +354,8 @@ impl PaperTradingEngine {
         // Update order status
         order.filled_quantity += fill_quantity;
         order.pending_quantity = 0;
-        order.average_price = Some(execution_price);
-        order.status = ZerodhaOrderStatus::Complete;
+        order.average_price = Some(Decimal::from_f64(execution_price).unwrap_or_default());
+        order.status = OrderStatus::COMPLETE;
         order.exchange_timestamp = Some(Utc::now());
         order.status_message = Some("Order executed in paper trading mode".to_string());
         paper_order.executed_at = Some(Instant::now());
@@ -341,11 +364,15 @@ impl PaperTradingEngine {
         let commission = self.config.paper_commission;
         self.total_commission += commission;
         
+        // Extract data needed after position update to avoid borrowing conflicts
+        let order_clone = order.clone();
+        let transaction_type = order.transaction_type;
+        
         // Update position
-        self.update_position(order, execution_price, commission).await?;
+        self.update_position(&order_clone, execution_price, commission).await?;
         
         // Update balance for sell orders (buy orders already reserved margin)
-        if order.transaction_type == "SELL" {
+        if transaction_type == TransactionType::SELL {
             let proceeds = execution_price * fill_quantity as f64 - commission;
             self.balance += proceeds;
             self.available_margin += proceeds;
@@ -364,6 +391,11 @@ impl PaperTradingEngine {
     async fn update_position(&mut self, order: &ZerodhaOrder, price: f64, commission: f64) -> ZerodhaResult<()> {
         let position_key = format!("{}_{}", order.tradingsymbol, order.exchange);
         
+        let trade_quantity = match order.transaction_type {
+            TransactionType::BUY => order.filled_quantity as i32,
+            TransactionType::SELL => -(order.filled_quantity as i32),
+        };
+        
         let position = self.positions.entry(position_key.clone()).or_insert_with(|| {
             PaperPosition {
                 symbol: order.tradingsymbol.clone(),
@@ -375,12 +407,6 @@ impl PaperTradingEngine {
                 last_price: price,
             }
         });
-        
-        let trade_quantity = match order.transaction_type.as_str() {
-            "BUY" => order.filled_quantity as i32,
-            "SELL" => -(order.filled_quantity as i32),
-            _ => 0,
-        };
         
         // Update position
         if position.quantity == 0 {
@@ -415,7 +441,13 @@ impl PaperTradingEngine {
         }
         
         position.last_price = price;
-        position.unrealized_pnl = self.calculate_unrealized_pnl(position);
+        // Calculate unrealized P&L inline to avoid borrowing conflict
+        let pnl_per_share = if position.quantity > 0 {
+            position.last_price - position.average_price  // Long position
+        } else {
+            position.average_price - position.last_price  // Short position
+        };
+        position.unrealized_pnl = pnl_per_share * position.quantity.abs() as f64;
         
         // Remove position if quantity is zero
         if position.quantity == 0 {
@@ -454,7 +486,7 @@ impl PaperTradingEngine {
         }
         
         // Validate price for limit orders
-        if matches!(request.order_type, Some(OrderType::Limit)) && request.price.is_none() {
+        if request.order_type == OrderType::LIMIT && request.price.is_none() {
             return Err(ZerodhaError::validation_error("Price required for limit orders"));
         }
         
@@ -463,13 +495,15 @@ impl PaperTradingEngine {
     
     /// Calculate required margin for an order
     fn calculate_required_margin(&self, order: &ZerodhaOrder) -> ZerodhaResult<f64> {
-        let order_value = order.price.unwrap_or(100.0) * order.quantity as f64;
+        let order_value = order.price.to_f64().unwrap_or(100.0) * order.quantity as f64;
         
         // Different margin requirements based on product type
         let margin_factor = match order.product {
-            ProductType::MIS => 0.2,   // 20% for intraday
-            ProductType::CNC => 1.0,   // 100% for delivery
-            ProductType::NRML => 0.5,  // 50% for normal
+            Product::MIS => 0.2,   // 20% for intraday
+            Product::CNC => 1.0,   // 100% for delivery
+            Product::NRML => 0.5,  // 50% for normal
+            Product::BO => 0.3,    // 30% for bracket orders
+            Product::CO => 0.2,    // 20% for cover orders
         };
         
         Ok(order_value * margin_factor)
@@ -489,21 +523,37 @@ impl PaperTradingEngine {
     /// Get all positions
     pub fn get_positions(&self) -> Vec<ZerodhaPosition> {
         self.positions.values().map(|pp| ZerodhaPosition {
+            account_id: "PAPER123".to_string(),
+            exchange: Exchange::NSE, // Default to NSE for paper trading
             tradingsymbol: pp.symbol.clone(),
-            exchange: pp.exchange.clone(),
             instrument_token: 0, // Not used in paper trading
-            product: ProductType::MIS,
+            product: Product::MIS,
             quantity: pp.quantity,
             overnight_quantity: 0,
-            multiplier: 1.0,
-            average_price: pp.average_price,
-            close_price: pp.last_price,
-            last_price: pp.last_price,
-            value: pp.average_price * pp.quantity.abs() as f64,
-            pnl: pp.realized_pnl + pp.unrealized_pnl,
-            m2m: pp.unrealized_pnl,
-            unrealised: pp.unrealized_pnl,
-            realised: pp.realized_pnl,
+            t1_quantity: 0,
+            realised: Decimal::from_f64(pp.realized_pnl).unwrap_or_default(),
+            unrealised: Decimal::from_f64(pp.unrealized_pnl).unwrap_or_default(),
+            value: Decimal::from_f64(pp.average_price * pp.quantity.abs() as f64).unwrap_or_default(),
+            pnl: Decimal::from_f64(pp.realized_pnl + pp.unrealized_pnl).unwrap_or_default(),
+            m2m: Decimal::from_f64(pp.unrealized_pnl).unwrap_or_default(),
+            multiplier: Decimal::from_f64(1.0).unwrap_or_default(),
+            average_price: Decimal::from_f64(pp.average_price).unwrap_or_default(),
+            last_price: Decimal::from_f64(pp.last_price).unwrap_or_default(),
+            close_price: Decimal::from_f64(pp.last_price).unwrap_or_default(),
+            buy_quantity: if pp.quantity > 0 { pp.quantity as u32 } else { 0 },
+            buy_price: if pp.quantity > 0 { Decimal::from_f64(pp.average_price).unwrap_or_default() } else { Decimal::ZERO },
+            buy_value: if pp.quantity > 0 { Decimal::from_f64(pp.average_price * pp.quantity as f64).unwrap_or_default() } else { Decimal::ZERO },
+            buy_m2m: if pp.quantity > 0 { Decimal::from_f64(pp.unrealized_pnl).unwrap_or_default() } else { Decimal::ZERO },
+            sell_quantity: if pp.quantity < 0 { pp.quantity.abs() as u32 } else { 0 },
+            sell_price: if pp.quantity < 0 { Decimal::from_f64(pp.average_price).unwrap_or_default() } else { Decimal::ZERO },
+            sell_value: if pp.quantity < 0 { Decimal::from_f64(pp.average_price * pp.quantity.abs() as f64).unwrap_or_default() } else { Decimal::ZERO },
+            sell_m2m: if pp.quantity < 0 { Decimal::from_f64(pp.unrealized_pnl).unwrap_or_default() } else { Decimal::ZERO },
+            day_buy_quantity: if pp.quantity > 0 { pp.quantity as u32 } else { 0 },
+            day_buy_price: if pp.quantity > 0 { Decimal::from_f64(pp.average_price).unwrap_or_default() } else { Decimal::ZERO },
+            day_buy_value: if pp.quantity > 0 { Decimal::from_f64(pp.average_price * pp.quantity as f64).unwrap_or_default() } else { Decimal::ZERO },
+            day_sell_quantity: if pp.quantity < 0 { pp.quantity.abs() as u32 } else { 0 },
+            day_sell_price: if pp.quantity < 0 { Decimal::from_f64(pp.average_price).unwrap_or_default() } else { Decimal::ZERO },
+            day_sell_value: if pp.quantity < 0 { Decimal::from_f64(pp.average_price * pp.quantity.abs() as f64).unwrap_or_default() } else { Decimal::ZERO },
         }).collect()
     }
     

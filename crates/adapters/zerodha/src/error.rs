@@ -120,6 +120,21 @@ impl ZerodhaError {
         Self::WebSocket(message.into())
     }
     
+    /// Create a validation error
+    pub fn validation_error(message: impl Into<String>) -> Self {
+        Self::InvalidInput(message.into())
+    }
+    
+    /// Create a parse error
+    pub fn parse_error(message: impl Into<String>) -> Self {
+        Self::Internal(message.into())
+    }
+    
+    /// Create execution error
+    pub fn execution_error(message: impl Into<String>) -> Self {
+        Self::Internal(message.into())
+    }
+    
     /// Check if error is recoverable (retry-able)
     pub fn is_recoverable(&self) -> bool {
         matches!(

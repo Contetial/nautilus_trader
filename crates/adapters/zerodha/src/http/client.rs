@@ -24,11 +24,11 @@ use crate::{
 };
 use chrono::{DateTime, NaiveDate, Utc};
 use reqwest::{header::HeaderMap, Client, Method, RequestBuilder, Response};
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, prelude::FromPrimitive};
 use serde_json::Value;
 use std::{collections::HashMap, time::Duration};
 use tokio::time::{sleep, Instant};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info};
 
 /// Rate limiter to handle Zerodha's API limits (3 requests/second)
 #[derive(Debug)]
@@ -100,7 +100,7 @@ impl ZerodhaHttpClient {
                 .unwrap(),
         );
         
-        let request = self.client.request(method, &url).headers(headers);
+        let request = self.client.request(method.clone(), &url).headers(headers);
         
         if self.config.debug_mode {
             debug!("Building request: {} {}", method, url);
@@ -301,28 +301,11 @@ impl ZerodhaHttpClient {
         self.execute_json(request).await
     }
     
-    /// Place order using form parameters
-    pub async fn place_order(&self, params: HashMap<String, String>) -> ZerodhaResult<crate::types::ZerodhaOrderResponse> {
-        let form_params: Vec<(String, String)> = params.into_iter().collect();
-        
-        let request = self.build_request(Method::POST, "orders/regular")?
-            .form(&form_params);
-        
-        let response: HashMap<String, serde_json::Value> = self.execute_json(request).await?;
-        
-        let order_id = response.get("order_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ZerodhaError::parse_error("No order_id in response"))?;
-        
-        Ok(crate::types::ZerodhaOrderResponse {
-            order_id: order_id.to_string(),
-        })
-    }
-    
     /// Modify existing order
     pub async fn modify_order(&self, params: HashMap<String, String>) -> ZerodhaResult<crate::types::ZerodhaOrderResponse> {
         let order_id = params.get("order_id")
-            .ok_or_else(|| ZerodhaError::validation_error("order_id required for modification"))?;
+            .ok_or_else(|| ZerodhaError::validation_error("order_id required for modification"))?
+            .clone();
         
         let form_params: Vec<(String, String)> = params.into_iter()
             .filter(|(k, _)| k != "order_id")
@@ -504,18 +487,18 @@ impl ZerodhaHttpClient {
                     
                     result.push(ZerodhaCandle {
                         timestamp,
-                        open: array[1].as_f64()
+                        open: Decimal::from_f64(array[1].as_f64()
                             .ok_or_else(|| ZerodhaError::invalid_input("Invalid open price"))?
-                            .into(),
-                        high: array[2].as_f64()
+                            ).unwrap_or_default(),
+                        high: Decimal::from_f64(array[2].as_f64()
                             .ok_or_else(|| ZerodhaError::invalid_input("Invalid high price"))?
-                            .into(),
-                        low: array[3].as_f64()
+                            ).unwrap_or_default(),
+                        low: Decimal::from_f64(array[3].as_f64()
                             .ok_or_else(|| ZerodhaError::invalid_input("Invalid low price"))?
-                            .into(),
-                        close: array[4].as_f64()
+                            ).unwrap_or_default(),
+                        close: Decimal::from_f64(array[4].as_f64()
                             .ok_or_else(|| ZerodhaError::invalid_input("Invalid close price"))?
-                            .into(),
+                            ).unwrap_or_default(),
                         volume: array[5].as_u64()
                             .ok_or_else(|| ZerodhaError::invalid_input("Invalid volume"))?
                             as u32,

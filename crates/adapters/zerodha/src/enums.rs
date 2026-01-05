@@ -187,6 +187,16 @@ impl TickerMode {
     }
 }
 
+impl std::fmt::Display for TickerMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TickerMode::LTP => write!(f, "ltp"),
+            TickerMode::Quote => write!(f, "quote"),
+            TickerMode::Full => write!(f, "full"),
+        }
+    }
+}
+
 /// Market status
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Display, EnumString)]
 #[strum(serialize_all = "lowercase")]
@@ -273,6 +283,19 @@ impl Default for Product {
         Self::MIS
     }
 }
+
+impl TransactionType {
+    /// Get string representation
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TransactionType::BUY => "BUY",
+            TransactionType::SELL => "SELL",
+        }
+    }
+}
+
+/// Type alias for backward compatibility
+pub type ProductType = Product;
 
 #[cfg(test)]
 mod tests {

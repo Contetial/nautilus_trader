@@ -323,8 +323,8 @@ impl ZerodhaCredentialsConfig {
         
         // 3. Home directory
         if let Some(home_dir) = env::var("HOME").ok().or_else(|| env::var("USERPROFILE").ok()) {
-            paths.push(PathBuf::from(home_dir).join(".zerodha_credentials.toml"));
-            paths.push(PathBuf::from(home_dir).join(".config").join("zerodha_credentials.toml"));
+            paths.push(PathBuf::from(&home_dir).join(".zerodha_credentials.toml"));
+            paths.push(PathBuf::from(&home_dir).join(".config").join("zerodha_credentials.toml"));
         }
         
         // 4. System config directories
