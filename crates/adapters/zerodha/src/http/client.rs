@@ -62,7 +62,7 @@ impl RateLimiter {
 pub struct ZerodhaHttpClient {
     client: Client,
     config: ZerodhaConfig,
-    rate_limiter: std::sync::Mutex<RateLimiter>,
+    rate_limiter: tokio::sync::Mutex<RateLimiter>,
 }
 
 impl ZerodhaHttpClient {
@@ -75,7 +75,7 @@ impl ZerodhaHttpClient {
             .build()
             .map_err(|e| ZerodhaError::Internal(format!("Failed to create HTTP client: {}", e)))?;
         
-        let rate_limiter = std::sync::Mutex::new(RateLimiter::new(config.rate_limit_per_second));
+        let rate_limiter = tokio::sync::Mutex::new(RateLimiter::new(config.rate_limit_per_second));
         
         Ok(Self {
             client,
@@ -113,7 +113,7 @@ impl ZerodhaHttpClient {
     async fn execute_request(&self, request: RequestBuilder) -> ZerodhaResult<Response> {
         // Apply rate limiting
         {
-            let mut limiter = self.rate_limiter.lock().unwrap();
+            let mut limiter = self.rate_limiter.lock().await;
             limiter.wait_if_needed().await;
         }
         

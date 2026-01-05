@@ -21,3 +21,11 @@ rustflags = [
 rustflags = [
     "-C", "target-feature=+crt-static",
 ]
+
+[env]
+# Add cmake and NASM to PATH for aws-lc-sys on Windows
+CMAKE = "C:\\Program Files\\CMake\\bin\\cmake.exe"
+AWS_LC_SYS_CMAKE = "C:\\Program Files\\CMake\\bin\\cmake.exe"
+AWS_LC_SYS_PREBUILT_NASM = "C:\\Program Files\\NASM\\nasm.exe"
+# Protobuf compiler for prost-build
+PROTOC = "D:\\Nautilus-Trader\\protoc\\bin\\protoc.exe"

@@ -13,7 +13,7 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-use aws_lc_rs::{hmac, rand as lc_rand, rsa::KeyPair, signature as lc_signature};
+use ring::{hmac, rand as ring_rand, signature as ring_signature};
 use base64::prelude::*;
 use ed25519_dalek::{Signature as Ed25519Signature, Signer, SigningKey};
 use hex;
@@ -56,16 +56,16 @@ pub fn rsa_signature(private_key_pem: &str, data: &str) -> anyhow::Result<String
     }
 
     // Construct RSA key pair from PKCS#8 DER bytes
-    let key_pair = KeyPair::from_pkcs8(pem.contents())
+    let key_pair = ring_signature::RsaKeyPair::from_pkcs8(pem.contents())
         .map_err(|_| anyhow::anyhow!("Failed to decode RSA private key"))?;
 
-    // Prepare RNG and output buffer (signature length = modulus length)
-    let rng = lc_rand::SystemRandom::new();
+    // Prepare RNG and output buffer
+    let rng = ring_rand::SystemRandom::new();
     let mut signature = vec![0u8; key_pair.public_modulus_len()];
 
     key_pair
         .sign(
-            &lc_signature::RSA_PKCS1_SHA256,
+            &ring_signature::RSA_PKCS1_SHA256,
             &rng,
             data.as_bytes(),
             &mut signature,

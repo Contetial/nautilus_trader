@@ -1,0 +1,205 @@
+syntax = "proto3";
+
+package nautilus.gateway.strategy;
+
+// Strategy management service for algorithmic trading
+service StrategyService {
+  // List all strategies
+  rpc ListStrategies(ListStrategiesRequest) returns (StrategyList);
+
+  // Get strategy details
+  rpc GetStrategy(StrategyId) returns (Strategy);
+
+  // Start a strategy
+  rpc StartStrategy(StartStrategyRequest) returns (StrategyStatus);
+
+  // Stop a strategy
+  rpc StopStrategy(StrategyId) returns (StrategyStatus);
+
+  // Pause a strategy
+  rpc PauseStrategy(StrategyId) returns (StrategyStatus);
+
+  // Stream strategy signals
+  rpc GetStrategySignals(StrategyId) returns (stream Signal);
+
+  // Stream strategy logs
+  rpc GetStrategyLogs(StrategyId) returns (stream LogEntry);
+
+  // Run backtest
+  rpc RunBacktest(BacktestRequest) returns (stream BacktestUpdate);
+
+  // Configure strategy parameters
+  rpc ConfigureStrategy(StrategyConfig) returns (StrategyStatus);
+}
+
+message StrategyId {
+  string id = 1;
+}
+
+message ListStrategiesRequest {
+  StrategyState state_filter = 1;
+  TradingMode mode_filter = 2;
+}
+
+message Strategy {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  string file_path = 4;
+  StrategyState state = 5;
+  TradingMode mode = 6;
+  map<string, string> parameters = 7;
+  StrategyMetrics metrics = 8;
+  int64 created_at = 9;
+  int64 last_run_at = 10;
+}
+
+enum StrategyState {
+  STRATEGY_STATE_IDLE = 0;
+  STRATEGY_STATE_RUNNING = 1;
+  STRATEGY_STATE_PAUSED = 2;
+  STRATEGY_STATE_STOPPED = 3;
+  STRATEGY_STATE_ERROR = 4;
+}
+
+enum TradingMode {
+  TRADING_MODE_BACKTEST = 0;
+  TRADING_MODE_PAPER = 1;
+  TRADING_MODE_LIVE = 2;
+}
+
+message StrategyMetrics {
+  double total_pnl = 1;
+  int32 total_trades = 2;
+  int32 winning_trades = 3;
+  double win_rate = 4;
+  double max_drawdown = 5;
+  double sharpe_ratio = 6;
+  double profit_factor = 7;
+}
+
+message StrategyList {
+  repeated Strategy strategies = 1;
+}
+
+message StartStrategyRequest {
+  string id = 1;
+  TradingMode mode = 2;
+  map<string, string> runtime_params = 3;
+}
+
+message StrategyStatus {
+  string id = 1;
+  StrategyState state = 2;
+  string message = 3;
+  int64 timestamp = 4;
+}
+
+message StrategyConfig {
+  string id = 1;
+  map<string, string> parameters = 2;
+  RiskLimits risk_limits = 3;
+  repeated string instruments = 4;
+}
+
+message RiskLimits {
+  double max_position_value = 1;
+  double max_daily_loss = 2;
+  double max_drawdown = 3;
+  int32 max_open_orders = 4;
+  int32 max_trades_per_day = 5;
+}
+
+message Signal {
+  string strategy_id = 1;
+  string symbol = 2;
+  SignalType signal_type = 3;
+  SignalSide side = 4;
+  double price = 5;
+  int32 quantity = 6;
+  string reason = 7;
+  int64 timestamp = 8;
+}
+
+enum SignalType {
+  SIGNAL_TYPE_ENTRY = 0;
+  SIGNAL_TYPE_EXIT = 1;
+  SIGNAL_TYPE_SCALE_IN = 2;
+  SIGNAL_TYPE_SCALE_OUT = 3;
+}
+
+enum SignalSide {
+  SIGNAL_SIDE_LONG = 0;
+  SIGNAL_SIDE_SHORT = 1;
+}
+
+message LogEntry {
+  string strategy_id = 1;
+  LogLevel level = 2;
+  string message = 3;
+  int64 timestamp = 4;
+  map<string, string> context = 5;
+}
+
+enum LogLevel {
+  LOG_LEVEL_DEBUG = 0;
+  LOG_LEVEL_INFO = 1;
+  LOG_LEVEL_WARNING = 2;
+  LOG_LEVEL_ERROR = 3;
+}
+
+message BacktestRequest {
+  string strategy_id = 1;
+  int64 start_date = 2;
+  int64 end_date = 3;
+  double initial_capital = 4;
+  map<string, string> parameters = 5;
+}
+
+message BacktestUpdate {
+  BacktestPhase phase = 1;
+  double progress = 2;         // 0.0 to 1.0
+  string message = 3;
+  BacktestResult result = 4;   // Populated when phase is COMPLETE
+}
+
+enum BacktestPhase {
+  BACKTEST_PHASE_LOADING = 0;
+  BACKTEST_PHASE_RUNNING = 1;
+  BACKTEST_PHASE_COMPLETE = 2;
+  BACKTEST_PHASE_ERROR = 3;
+}
+
+message BacktestResult {
+  double total_return = 1;
+  double total_pnl = 2;
+  int32 total_trades = 3;
+  double win_rate = 4;
+  double max_drawdown = 5;
+  double sharpe_ratio = 6;
+  double sortino_ratio = 7;
+  double profit_factor = 8;
+  double avg_trade_pnl = 9;
+  double max_consecutive_wins = 10;
+  double max_consecutive_losses = 11;
+  repeated EquityPoint equity_curve = 12;
+  repeated TradeRecord trades = 13;
+}
+
+message EquityPoint {
+  int64 timestamp = 1;
+  double equity = 2;
+  double drawdown = 3;
+}
+
+message TradeRecord {
+  string symbol = 1;
+  SignalSide side = 2;
+  int64 entry_time = 3;
+  int64 exit_time = 4;
+  double entry_price = 5;
+  double exit_price = 6;
+  int32 quantity = 7;
+  double pnl = 8;
+  double pnl_percent = 9;
+}

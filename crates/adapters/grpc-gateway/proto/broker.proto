@@ -1,0 +1,63 @@
+syntax = "proto3";
+
+package nautilus.gateway.broker;
+
+// Broker management service
+service BrokerService {
+  // List all configured brokers
+  rpc ListBrokers(Empty) returns (BrokerList);
+
+  // Add a new broker configuration
+  rpc AddBroker(BrokerConfig) returns (BrokerStatus);
+
+  // Remove a broker configuration
+  rpc RemoveBroker(BrokerId) returns (Empty);
+
+  // Test broker connection
+  rpc TestConnection(BrokerId) returns (ConnectionResult);
+
+  // Stream broker status updates
+  rpc GetBrokerStatus(BrokerId) returns (stream BrokerStatus);
+}
+
+message Empty {}
+
+message BrokerId {
+  string id = 1;  // e.g., "zerodha", "kotak", "angel"
+}
+
+message BrokerConfig {
+  string id = 1;
+  string name = 2;
+  string broker_type = 3;  // e.g., "zerodha", "kotak", "angel"
+  map<string, string> credentials = 4;  // api_key, api_secret, access_token, etc.
+  map<string, string> extra_params = 5;
+}
+
+message BrokerStatus {
+  string id = 1;
+  string name = 2;
+  ConnectionState state = 3;
+  string error_message = 4;
+  int64 last_connected_timestamp = 5;
+}
+
+enum ConnectionState {
+  CONNECTION_STATE_UNKNOWN = 0;
+  CONNECTION_STATE_OFFLINE = 1;
+  CONNECTION_STATE_CONNECTING = 2;
+  CONNECTION_STATE_ONLINE = 3;
+  CONNECTION_STATE_ERROR = 4;
+}
+
+message BrokerList {
+  repeated BrokerStatus brokers = 1;
+}
+
+message ConnectionResult {
+  bool success = 1;
+  string message = 2;
+  string user_id = 3;
+  string user_name = 4;
+  repeated string exchanges = 5;
+}

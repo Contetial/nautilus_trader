@@ -1,0 +1,130 @@
+syntax = "proto3";
+
+package nautilus.gateway.market_data;
+
+// Market data service for quotes, charts, and instruments
+service MarketDataService {
+  // Search and list instruments
+  rpc GetInstruments(InstrumentFilter) returns (InstrumentList);
+
+  // Subscribe to live market data
+  rpc Subscribe(SubscriptionRequest) returns (stream MarketTick);
+
+  // Get historical bars/candles
+  rpc GetHistoricalBars(BarRequest) returns (BarList);
+
+  // Get option chain for an underlying
+  rpc GetOptionChain(OptionChainRequest) returns (OptionChain);
+}
+
+message InstrumentFilter {
+  string query = 1;           // Search query (symbol or name)
+  string exchange = 2;        // Filter by exchange: NSE, BSE, NFO, etc.
+  string instrument_type = 3; // EQ, FUT, OPT, IDX
+  int32 limit = 4;            // Max results to return
+}
+
+message Instrument {
+  string symbol = 1;
+  string name = 2;
+  string exchange = 3;
+  string instrument_type = 4;
+  string trading_symbol = 5;
+  int64 instrument_token = 6;
+  int32 lot_size = 7;
+  double tick_size = 8;
+  string expiry = 9;          // For derivatives
+  double strike = 10;         // For options
+  string option_type = 11;    // CE or PE for options
+}
+
+message InstrumentList {
+  repeated Instrument instruments = 1;
+  int32 total_count = 2;
+}
+
+message SubscriptionRequest {
+  repeated string symbols = 1;
+  string exchange = 2;
+  SubscriptionMode mode = 3;
+}
+
+enum SubscriptionMode {
+  SUBSCRIPTION_MODE_LTP = 0;
+  SUBSCRIPTION_MODE_QUOTE = 1;
+  SUBSCRIPTION_MODE_FULL = 2;
+}
+
+message MarketTick {
+  string symbol = 1;
+  string exchange = 2;
+  double ltp = 3;            // Last traded price
+  double open = 4;
+  double high = 5;
+  double low = 6;
+  double close = 7;          // Previous close
+  int64 volume = 8;
+  double bid = 9;
+  double ask = 10;
+  int64 bid_qty = 11;
+  int64 ask_qty = 12;
+  double change = 13;
+  double change_percent = 14;
+  int64 timestamp = 15;      // Unix timestamp in nanoseconds
+  int64 oi = 16;             // Open interest (for derivatives)
+}
+
+message BarRequest {
+  string symbol = 1;
+  string exchange = 2;
+  string interval = 3;       // minute, 5minute, 15minute, hour, day
+  int64 from_timestamp = 4;  // Unix timestamp
+  int64 to_timestamp = 5;
+}
+
+message Bar {
+  int64 timestamp = 1;
+  double open = 2;
+  double high = 3;
+  double low = 4;
+  double close = 5;
+  int64 volume = 6;
+}
+
+message BarList {
+  string symbol = 1;
+  string interval = 2;
+  repeated Bar bars = 3;
+}
+
+message OptionChainRequest {
+  string underlying = 1;     // e.g., "NIFTY", "BANKNIFTY"
+  string expiry = 2;         // YYYY-MM-DD format
+}
+
+message OptionChain {
+  string underlying = 1;
+  string expiry = 2;
+  double spot_price = 3;
+  repeated OptionStrike strikes = 4;
+}
+
+message OptionStrike {
+  double strike_price = 1;
+  OptionData call = 2;
+  OptionData put = 3;
+}
+
+message OptionData {
+  string symbol = 1;
+  double ltp = 2;
+  double bid = 3;
+  double ask = 4;
+  int64 volume = 5;
+  int64 oi = 6;
+  double iv = 7;             // Implied volatility
+  double delta = 8;
+  double gamma = 9;
+  double theta = 10;
+  double vega = 11;
+}

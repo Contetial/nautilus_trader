@@ -1,0 +1,163 @@
+syntax = "proto3";
+
+package nautilus.gateway.order;
+
+// Order management service
+service OrderService {
+  // Place a new order
+  rpc PlaceOrder(OrderRequest) returns (OrderResponse);
+
+  // Modify an existing order
+  rpc ModifyOrder(ModifyOrderRequest) returns (OrderResponse);
+
+  // Cancel an order
+  rpc CancelOrder(CancelOrderRequest) returns (OrderResponse);
+
+  // Stream order updates
+  rpc GetOrders(OrderFilter) returns (stream OrderUpdate);
+
+  // Place bracket order
+  rpc PlaceBracketOrder(BracketOrderRequest) returns (BracketOrderResponse);
+
+  // Place GTT (Good Till Triggered) order
+  rpc PlaceGTTOrder(GTTOrderRequest) returns (GTTOrderResponse);
+
+  // Cancel GTT order
+  rpc CancelGTTOrder(GTTCancelRequest) returns (OrderResponse);
+}
+
+message OrderRequest {
+  string symbol = 1;
+  string exchange = 2;
+  OrderSide side = 3;
+  OrderType order_type = 4;
+  ProductType product = 5;
+  int32 quantity = 6;
+  double price = 7;           // For LIMIT orders
+  double trigger_price = 8;   // For SL orders
+  OrderValidity validity = 9;
+  string broker_id = 10;
+  string tag = 11;            // User tag for tracking
+}
+
+enum OrderSide {
+  ORDER_SIDE_BUY = 0;
+  ORDER_SIDE_SELL = 1;
+}
+
+enum OrderType {
+  ORDER_TYPE_MARKET = 0;
+  ORDER_TYPE_LIMIT = 1;
+  ORDER_TYPE_SL = 2;
+  ORDER_TYPE_SL_M = 3;
+}
+
+enum ProductType {
+  PRODUCT_TYPE_MIS = 0;   // Intraday
+  PRODUCT_TYPE_CNC = 1;   // Delivery
+  PRODUCT_TYPE_NRML = 2;  // F&O overnight
+}
+
+enum OrderValidity {
+  ORDER_VALIDITY_DAY = 0;
+  ORDER_VALIDITY_IOC = 1;
+  ORDER_VALIDITY_GTT = 2;
+}
+
+enum OrderStatus {
+  ORDER_STATUS_PENDING = 0;
+  ORDER_STATUS_OPEN = 1;
+  ORDER_STATUS_COMPLETE = 2;
+  ORDER_STATUS_CANCELLED = 3;
+  ORDER_STATUS_REJECTED = 4;
+}
+
+message OrderResponse {
+  bool success = 1;
+  string order_id = 2;
+  string message = 3;
+  OrderStatus status = 4;
+}
+
+message ModifyOrderRequest {
+  string order_id = 1;
+  string broker_id = 2;
+  int32 quantity = 3;
+  double price = 4;
+  double trigger_price = 5;
+  OrderType order_type = 6;
+}
+
+message CancelOrderRequest {
+  string order_id = 1;
+  string broker_id = 2;
+}
+
+message OrderFilter {
+  string broker_id = 1;
+  repeated OrderStatus statuses = 2;
+  int64 from_timestamp = 3;
+  int64 to_timestamp = 4;
+}
+
+message OrderUpdate {
+  string order_id = 1;
+  string symbol = 2;
+  string exchange = 3;
+  OrderSide side = 4;
+  OrderType order_type = 5;
+  ProductType product = 6;
+  int32 quantity = 7;
+  int32 filled_quantity = 8;
+  double price = 9;
+  double trigger_price = 10;
+  double average_price = 11;
+  OrderStatus status = 12;
+  string status_message = 13;
+  int64 timestamp = 14;
+  string broker_id = 15;
+  string tag = 16;
+}
+
+message BracketOrderRequest {
+  OrderRequest entry = 1;
+  double stoploss = 2;
+  double target = 3;
+  int32 trailing_stoploss = 4; // In ticks
+}
+
+message BracketOrderResponse {
+  bool success = 1;
+  string entry_order_id = 2;
+  string stoploss_order_id = 3;
+  string target_order_id = 4;
+  string message = 5;
+}
+
+message GTTOrderRequest {
+  string symbol = 1;
+  string exchange = 2;
+  OrderSide side = 3;
+  ProductType product = 4;
+  int32 quantity = 5;
+  double trigger_price = 6;
+  double limit_price = 7;
+  GTTType gtt_type = 8;
+  string broker_id = 9;
+}
+
+enum GTTType {
+  GTT_TYPE_SINGLE = 0;
+  GTT_TYPE_OCO = 1;  // One Cancels Other
+}
+
+message GTTOrderResponse {
+  bool success = 1;
+  string gtt_id = 2;
+  string message = 3;
+}
+
+message GTTCancelRequest {
+  string gtt_id = 1;
+  string broker_id = 2;
+}

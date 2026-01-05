@@ -1,0 +1,124 @@
+syntax = "proto3";
+
+package nautilus.gateway.portfolio;
+
+// Portfolio management service for positions, holdings, and margins
+service PortfolioService {
+  // Stream position updates
+  rpc GetPositions(PositionRequest) returns (stream PositionUpdate);
+
+  // Get holdings (delivery shares)
+  rpc GetHoldings(HoldingsRequest) returns (HoldingsList);
+
+  // Stream margin updates
+  rpc GetMargins(MarginRequest) returns (stream MarginUpdate);
+
+  // Stream P&L updates
+  rpc GetPnL(PnLRequest) returns (stream PnLUpdate);
+
+  // Get day's activity summary
+  rpc GetDaySummary(DaySummaryRequest) returns (DaySummary);
+}
+
+message PositionRequest {
+  string broker_id = 1;
+  string product_type = 2; // Optional filter: MIS, CNC, NRML
+}
+
+message PositionUpdate {
+  string symbol = 1;
+  string exchange = 2;
+  string product = 3;
+  int32 quantity = 4;        // Net quantity (positive = long, negative = short)
+  double average_price = 5;
+  double ltp = 6;
+  double pnl = 7;
+  double pnl_percent = 8;
+  double value = 9;
+  double buy_quantity = 10;
+  double sell_quantity = 11;
+  double buy_value = 12;
+  double sell_value = 13;
+  int64 timestamp = 14;
+  string broker_id = 15;
+}
+
+message HoldingsRequest {
+  string broker_id = 1;
+}
+
+message Holding {
+  string symbol = 1;
+  string exchange = 2;
+  string isin = 3;
+  int32 quantity = 4;
+  int32 t1_quantity = 5;     // T+1 pending quantity
+  double average_price = 6;
+  double ltp = 7;
+  double pnl = 8;
+  double pnl_percent = 9;
+  double invested_value = 10;
+  double current_value = 11;
+  string broker_id = 12;
+}
+
+message HoldingsList {
+  repeated Holding holdings = 1;
+  double total_invested = 2;
+  double total_current = 3;
+  double total_pnl = 4;
+  double total_pnl_percent = 5;
+}
+
+message MarginRequest {
+  string broker_id = 1;
+}
+
+message MarginUpdate {
+  string broker_id = 1;
+  string segment = 2;        // equity, commodity
+  double available = 3;
+  double used = 4;
+  double total = 5;
+  double cash = 6;
+  double collateral = 7;
+  int64 timestamp = 8;
+}
+
+message PnLRequest {
+  string broker_id = 1;
+  PnLScope scope = 2;
+}
+
+enum PnLScope {
+  PNL_SCOPE_DAY = 0;
+  PNL_SCOPE_WEEK = 1;
+  PNL_SCOPE_MONTH = 2;
+  PNL_SCOPE_ALL = 3;
+}
+
+message PnLUpdate {
+  string broker_id = 1;
+  double realized_pnl = 2;
+  double unrealized_pnl = 3;
+  double total_pnl = 4;
+  double total_charges = 5;  // Brokerage, taxes, etc.
+  int64 timestamp = 6;
+}
+
+message DaySummaryRequest {
+  string broker_id = 1;
+}
+
+message DaySummary {
+  string broker_id = 1;
+  int32 total_trades = 2;
+  int32 winning_trades = 3;
+  int32 losing_trades = 4;
+  double gross_pnl = 5;
+  double charges = 6;
+  double net_pnl = 7;
+  double turnover = 8;
+  double max_profit_trade = 9;
+  double max_loss_trade = 10;
+}

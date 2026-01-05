@@ -6,6 +6,7 @@ members = [
     "crates/adapters/blockchain",
     "crates/adapters/coinbase_intx",
     "crates/adapters/databento",
+    "crates/adapters/grpc-gateway",
     "crates/adapters/hyperliquid",
     "crates/adapters/okx",
     "crates/adapters/tardis",
@@ -79,6 +80,7 @@ nautilus-hyperliquid = { path = "crates/adapters/hyperliquid", version = "0.50.0
 nautilus-okx = { path = "crates/adapters/okx", version = "0.50.0" }
 nautilus-tardis = { path = "crates/adapters/tardis", version = "0.50.0" }
 nautilus-zerodha = { path = "crates/adapters/zerodha", version = "0.50.0" }
+nautilus-grpc-gateway = { path = "crates/adapters/grpc-gateway", version = "0.50.0" }
 
 ahash = "0.8.12"
 alloy = { version = "1.0.25", default-features = false, features = ["sol-types", "contract"] }
@@ -89,7 +91,9 @@ arraydeque = "0.5.1"
 arrow = { version = "55.2.0", default-features = false, features = ["csv", "json", "ipc"] }
 async-stream = "0.3.6"
 async-trait = "0.1.89"
+# Note: aws-lc-rs requires NASM on Windows. For Windows builds, prefer ring.
 aws-lc-rs = { version = "1.13.3", default-features = false, features = ["non-fips"] }
+ring = "0.17"
 base64 = "0.22.1"
 binary-heap-plus = "0.5.0"
 bytes = { version = "1.10.1", features = ["serde"] }
@@ -179,7 +183,7 @@ reqwest = { version = "0.12.23", default-features = false, features = [
 rmp-serde = "1.3.0"
 rust_decimal = "1.37.2"
 rust_decimal_macros = "1.37.1"
-rustls = { version = "0.23.31", default-features = false, features = ["aws-lc-rs", "std"] }
+rustls = { version = "0.23.31", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pemfile = "2.2.0"
 ryu = "1.0.20"
 semver = "1.0.25"
@@ -235,6 +239,14 @@ urlencoding = "2.1.3"
 ustr = { version = "1.1.0", features = ["serde"] }
 uuid = { version = "1.18.0", features = ["v4", "serde"] }
 webpki-roots = "1.0.2"
+
+# gRPC dependencies (for grpc-gateway)
+tonic = "0.13"
+tonic-build = "0.13"
+prost = "0.13"
+prost-types = "0.13"
+aes-gcm = "0.10"
+argon2 = "0.5"
 
 # dev-dependencies
 axum = { version = "0.8.4", default-features = false, features = ["tokio", "http1"] }
