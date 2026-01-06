@@ -49,6 +49,9 @@ tower-http = { version = "0.6", features = ["cors", "trace"] }
 hyper = { version = "1.6", features = ["full"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 
+# HTTP client for external APIs (Groq, Claude)
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+
 # gRPC-Web support
 tonic-web = "0.13"
 
@@ -59,6 +62,13 @@ tracing-subscriber = { workspace = true }
 # Error handling
 thiserror = { workspace = true }
 anyhow = { workspace = true }
+
+# UUID generation
+uuid = { version = "1.11", features = ["v4"] }
+
+# Async utilities
+async-stream = "0.3"
+futures = "0.3"
 
 [build-dependencies]
 tonic-build = { workspace = true }

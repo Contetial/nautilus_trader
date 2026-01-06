@@ -6,6 +6,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build_client(true)
         .compile_protos(
             &[
+                "proto/ai.proto",
+                "proto/backtest.proto",
                 "proto/broker.proto",
                 "proto/market_data.proto",
                 "proto/order.proto",
@@ -16,6 +18,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
 
     // Re-run build if proto files change
+    println!("cargo:rerun-if-changed=proto/ai.proto");
+    println!("cargo:rerun-if-changed=proto/backtest.proto");
     println!("cargo:rerun-if-changed=proto/broker.proto");
     println!("cargo:rerun-if-changed=proto/market_data.proto");
     println!("cargo:rerun-if-changed=proto/order.proto");

@@ -6,6 +6,8 @@ use std::sync::Arc;
 
 use nautilus_grpc_gateway::{
     proto::{
+        ai::ai_service_server::AiServiceServer,
+        backtest::backtest_service_server::BacktestServiceServer,
         broker::broker_service_server::BrokerServiceServer,
         market_data::market_data_service_server::MarketDataServiceServer,
         order::order_service_server::OrderServiceServer,
@@ -13,9 +15,10 @@ use nautilus_grpc_gateway::{
         strategy::strategy_service_server::StrategyServiceServer,
     },
     services::{
-        BrokerServiceImpl, MarketDataServiceImpl, OrderServiceImpl,
+        AiServiceImpl, BrokerServiceImpl, MarketDataServiceImpl, OrderServiceImpl,
         PortfolioServiceImpl, StrategyServiceImpl,
     },
+    backtest_service::BacktestServiceImpl,
     http_api::create_http_router,
     ClientRegistry, SharedClients, start_client_sync,
     GatewayConfig,
@@ -50,16 +53,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _sync_handle = start_client_sync(Arc::clone(&registry), shared_clients.clone());
 
     // Create service implementations with shared state
+    let ai_service = Arc::new(AiServiceImpl::new());
+    let backtest_service = Arc::new(BacktestServiceImpl::new());
     let broker_service = BrokerServiceImpl::new(Arc::clone(&registry));
     let market_data_service = MarketDataServiceImpl::new(shared_clients.clone());
     let order_service = OrderServiceImpl::new(shared_clients.clone());
     let portfolio_service = PortfolioServiceImpl::new(shared_clients.clone());
     let strategy_service = StrategyServiceImpl::new();
 
-    tracing::info!("Services initialized");
+    tracing::info!("Services initialized (AI, Backtest, Broker, MarketData, Order, Portfolio, Strategy)");
 
     // Create HTTP router
-    let http_router = create_http_router(Arc::clone(&registry), shared_clients);
+    let http_router = create_http_router(
+        Arc::clone(&registry),
+        shared_clients,
+        Arc::clone(&ai_service),
+        Arc::clone(&backtest_service),
+    );
 
     // Start HTTP server
     let http_server = async {
@@ -72,6 +82,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let grpc_server = async {
         tracing::info!("gRPC server listening on {}", grpc_addr);
         Server::builder()
+            .add_service(AiServiceServer::from_arc(ai_service))
+            .add_service(BacktestServiceServer::from_arc(backtest_service))
             .add_service(BrokerServiceServer::new(broker_service))
             .add_service(MarketDataServiceServer::new(market_data_service))
             .add_service(OrderServiceServer::new(order_service))

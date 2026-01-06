@@ -3,6 +3,16 @@
 //! This module contains the Rust types generated from .proto files.
 //! The actual generated code will be created by build.rs during compilation.
 
+// Include generated AI service types
+pub mod ai {
+    tonic::include_proto!("nautilus.gateway.ai");
+}
+
+// Include generated backtest service types
+pub mod backtest {
+    tonic::include_proto!("nautilus.gateway.backtest");
+}
+
 // Include generated broker service types
 pub mod broker {
     tonic::include_proto!("nautilus.gateway.broker");

@@ -1,0 +1,151 @@
+syntax = "proto3";
+
+package nautilus.gateway.ai;
+
+// AI Service for strategy generation and chat
+service AiService {
+  // Generate a NautilusTrader strategy from natural language or visual builder input
+  rpc GenerateStrategy(GenerateStrategyRequest) returns (GenerateStrategyResponse);
+
+  // Refine an existing strategy with additional instructions
+  rpc RefineStrategy(RefineStrategyRequest) returns (RefineStrategyResponse);
+
+  // Get available AI models and their status
+  rpc GetAiStatus(GetAiStatusRequest) returns (GetAiStatusResponse);
+
+  // Save AI provider configuration (API keys, model selection)
+  rpc SaveAiConfig(SaveAiConfigRequest) returns (SaveAiConfigResponse);
+
+  // Get current AI configuration
+  rpc GetAiConfig(GetAiConfigRequest) returns (GetAiConfigResponse);
+
+  // Test AI provider connection
+  rpc TestConnection(TestConnectionRequest) returns (TestConnectionResponse);
+}
+
+// Strategy generation request
+message GenerateStrategyRequest {
+  // Natural language description of the strategy
+  string prompt = 1;
+
+  // Optional: Visual builder JSON (serialized conditions)
+  string visual_builder_json = 2;
+
+  // Input mode: "natural_language" or "visual_builder" or "hybrid"
+  string input_mode = 3;
+
+  // Optional: Preferred AI provider ("groq" or "claude")
+  string provider = 4;
+
+  // Optional: Specific model to use
+  string model = 5;
+
+  // Optional: Conversation history for context
+  repeated ChatMessage history = 6;
+}
+
+message GenerateStrategyResponse {
+  bool success = 1;
+  string strategy_code = 2;
+  string strategy_name = 3;
+  string error = 4;
+
+  // AI provider that was used
+  string provider_used = 5;
+  string model_used = 6;
+
+  // Token usage for billing tracking
+  int32 tokens_used = 7;
+}
+
+// Strategy refinement request
+message RefineStrategyRequest {
+  // Current strategy code to refine
+  string current_code = 1;
+
+  // Refinement instructions
+  string instructions = 2;
+
+  // Optional: Provider preference
+  string provider = 3;
+
+  // Conversation history
+  repeated ChatMessage history = 4;
+}
+
+message RefineStrategyResponse {
+  bool success = 1;
+  string refined_code = 2;
+  string changes_summary = 3;
+  string error = 4;
+  string provider_used = 5;
+  int32 tokens_used = 6;
+}
+
+// Chat message for conversation history
+message ChatMessage {
+  string role = 1;  // "user" or "assistant"
+  string content = 2;
+}
+
+// AI status request
+message GetAiStatusRequest {}
+
+message GetAiStatusResponse {
+  repeated AiProvider providers = 1;
+  string default_provider = 2;
+}
+
+message AiProvider {
+  string id = 1;           // "groq" or "claude"
+  string name = 2;         // Display name
+  bool configured = 3;     // Has API key configured
+  bool available = 4;      // Connection successful
+  repeated AiModel models = 5;
+}
+
+message AiModel {
+  string id = 1;           // Model ID (e.g., "mixtral-8x7b-32768")
+  string name = 2;         // Display name
+  bool recommended = 3;    // Is this the recommended model
+  int32 context_length = 4;
+}
+
+// AI configuration requests
+message SaveAiConfigRequest {
+  string provider = 1;
+  string api_key = 2;
+  string default_model = 3;
+}
+
+message SaveAiConfigResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message GetAiConfigRequest {}
+
+message GetAiConfigResponse {
+  string default_provider = 1;
+
+  // Groq config (API key masked)
+  bool groq_configured = 2;
+  string groq_api_key_masked = 3;
+  string groq_default_model = 4;
+
+  // Claude config (API key masked)
+  bool claude_configured = 5;
+  string claude_api_key_masked = 6;
+  string claude_default_model = 7;
+}
+
+message TestConnectionRequest {
+  string provider = 1;
+  string api_key = 2;
+}
+
+message TestConnectionResponse {
+  bool success = 1;
+  string error = 2;
+  repeated string available_models = 3;
+}
