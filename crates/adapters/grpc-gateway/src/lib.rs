@@ -11,6 +11,7 @@ pub mod http_api;
 pub mod backtest_service;
 pub mod broker_adapter;
 pub mod brokers;
+pub mod db;
 
 pub use registry::{ClientRegistry, SharedClients, BrokerEvent, BrokerInfo, ConnectionState, start_client_sync};
 

@@ -1,13 +1,13 @@
 //! HTTP/JSON API layer for frontend compatibility
 
+use chrono::Utc;
 use std::sync::Arc;
 use std::process::Command;
 use axum::{
     Router,
-    routing::{post, get},
+    routing::post,
     extract::{State, Json},
     response::IntoResponse,
-    http::StatusCode,
 };
 use serde::{Deserialize, Serialize};
 use tower_http::cors::{CorsLayer, Any};
@@ -17,6 +17,7 @@ use crate::proto::ai::ai_service_server::AiService;
 use crate::proto::backtest::backtest_service_server::BacktestService;
 use crate::services::AiServiceImpl;
 use crate::backtest_service::BacktestServiceImpl;
+use crate::db::{BrokerDb, BrokerRecord, BrokerUpdate};
 use axum::response::sse::{Event, Sse};
 use futures::stream::Stream;
 
@@ -140,7 +141,7 @@ pub struct SaveCredentialsRequest {
     #[serde(rename = "totpSecret")]
     pub totp_secret: String,
     #[serde(rename = "masterPassword")]
-    pub master_password: String,
+    pub master_password: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -148,13 +149,36 @@ pub struct SaveCredentialsResponse {
     pub success: bool,
     pub message: String,
 }
+// Update broker credentials (partial update support)
+#[derive(Debug, Deserialize)]
+pub struct UpdateBrokerRequest {
+    #[serde(rename = "brokerId")]
+    pub broker_id: String,
+    #[serde(rename = "brokerName")]
+    pub broker_name: Option<String>,
+    #[serde(rename = "apiKey")]
+    pub api_key: Option<String>,
+    #[serde(rename = "apiSecret")]
+    pub api_secret: Option<String>,
+    #[serde(rename = "userId")]
+    pub user_id: Option<String>,
+    pub password: Option<String>,
+    #[serde(rename = "totpSecret")]
+    pub totp_secret: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UpdateBrokerResponse {
+    pub success: bool,
+    pub message: String,
+}
+
+
 
 #[derive(Debug, Deserialize)]
 pub struct RefreshTokenRequest {
     #[serde(rename = "brokerId")]
-    pub broker_id: String,
-    #[serde(rename = "masterPassword")]
-    pub master_password: String,
+    pub broker_id: Option<String>,
     pub force: Option<bool>,
 }
 
@@ -227,14 +251,33 @@ pub struct AppState {
     pub clients: SharedClients,
     pub ai_service: Arc<AiServiceImpl>,
     pub backtest_service: Arc<BacktestServiceImpl>,
+    pub broker_db: Arc<BrokerDb>,
 }
 
 async fn list_brokers(State(state): State<AppState>) -> impl IntoResponse {
-    let brokers: Vec<BrokerInfo> = state.registry.list_brokers().await
-        .into_iter()
-        .map(|b| BrokerInfo { id: b.id, name: b.name, state: b.state as i32 })
-        .collect();
-    Json(BrokerListResponse { brokers })
+    // Get brokers from database
+    match state.broker_db.list() {
+        Ok(db_brokers) => {
+            let brokers: Vec<BrokerInfo> = db_brokers
+                .into_iter()
+                .map(|b| BrokerInfo {
+                    id: b.id,
+                    name: b.name,
+                    state: if b.has_token { 1 } else { 0 }, // 1 = connected, 0 = disconnected
+                })
+                .collect();
+            Json(BrokerListResponse { brokers })
+        }
+        Err(e) => {
+            tracing::error!("Failed to list brokers from database: {}", e);
+            // Fall back to registry
+            let brokers: Vec<BrokerInfo> = state.registry.list_brokers().await
+                .into_iter()
+                .map(|b| BrokerInfo { id: b.id, name: b.name, state: b.state as i32 })
+                .collect();
+            Json(BrokerListResponse { brokers })
+        }
+    }
 }
 
 async fn register_broker(Json(req): Json<serde_json::Value>) -> impl IntoResponse {
@@ -256,6 +299,44 @@ async fn test_connection(Json(_req): Json<serde_json::Value>) -> impl IntoRespon
     Json(ConnectionTestResponse { success: true, latency_ms: 45 })
 }
 
+async fn remove_broker(
+    State(state): State<AppState>,
+    Json(req): Json<BrokerIdRequest>,
+) -> impl IntoResponse {
+    let broker_id = req.broker_id.or(req.id).unwrap_or_default();
+    if broker_id.is_empty() {
+        return Json(serde_json::json!({
+            "success": false,
+            "error": "broker_id is required"
+        }));
+    }
+    tracing::info!("HTTP: Removing broker: {}", broker_id);
+
+    // Delete from database
+    match state.broker_db.delete(&broker_id) {
+        Ok(true) => {
+            tracing::info!("Deleted broker from database: {}", broker_id);
+            Json(serde_json::json!({
+                "success": true,
+                "message": format!("Broker {} removed successfully", broker_id)
+            }))
+        }
+        Ok(false) => {
+            Json(serde_json::json!({
+                "success": false,
+                "error": format!("Broker {} not found", broker_id)
+            }))
+        }
+        Err(e) => {
+            tracing::error!("Failed to delete broker: {}", e);
+            Json(serde_json::json!({
+                "success": false,
+                "error": format!("Failed to delete broker: {}", e)
+            }))
+        }
+    }
+}
+
 async fn get_day_summary(Json(_req): Json<BrokerIdRequest>) -> impl IntoResponse {
     let scripts_dir = std::env::var("NAUTILUS_SCRIPTS_DIR")
         .unwrap_or_else(|_| "D:/Nautilus-Trader/scripts/zerodha".to_string());
@@ -264,36 +345,27 @@ async fn get_day_summary(Json(_req): Json<BrokerIdRequest>) -> impl IntoResponse
         r#"
 import sys
 import json
-from pathlib import Path
 from datetime import datetime
 sys.path.insert(0, r'{scripts_dir}')
 from kite_api import KiteAPI
-
-# Load API key and access token
-metadata_file = Path.home() / '.nautilus' / 'broker_metadata.json'
-token_file = Path.home() / '.zerodha_token.json'
-
-import os
-if not metadata_file.exists() or not token_file.exists():
-    print(json.dumps({{"success": False, "error": "Credentials not configured"}}))
-    sys.exit(0)
-
-with open(metadata_file) as f:
-    metadata = json.load(f)
-api_key = metadata.get('api_key') or os.environ.get('KITE_API_KEY')
-if not api_key:
-    print(json.dumps({{"success": False, "error": "API key not configured. Re-register broker or set KITE_API_KEY."}}))
-    sys.exit(0)
-
-with open(token_file) as f:
-    token_data = json.load(f)
-access_token = token_data.get('access_token')
-expiry = datetime.fromisoformat(token_data.get('expiry', ''))
-if datetime.now() >= expiry:
-    print(json.dumps({{"success": False, "error": "Token expired"}}))
-    sys.exit(0)
+from auto_login import load_credentials_from_db, get_token_from_db
 
 try:
+    creds = load_credentials_from_db('zerodha')
+    token_data = get_token_from_db('zerodha')
+    if not token_data:
+        print(json.dumps({{"success": False, "error": "No valid token. Please refresh."}}))
+        sys.exit(0)
+
+    # Check token expiry
+    expiry_ts = token_data.get('expiry')
+    if expiry_ts and datetime.now().timestamp() >= expiry_ts:
+        print(json.dumps({{"success": False, "error": "Token expired. Please refresh."}}))
+        sys.exit(0)
+
+    api_key = creds['api_key']
+    access_token = token_data['access_token']
+
     api = KiteAPI(api_key, access_token)
     positions = api.get_positions()
 
@@ -365,35 +437,27 @@ async fn get_holdings(Json(_req): Json<BrokerIdRequest>) -> impl IntoResponse {
         r#"
 import sys
 import json
-from pathlib import Path
 from datetime import datetime
 sys.path.insert(0, r'{scripts_dir}')
 from kite_api import KiteAPI
-
-metadata_file = Path.home() / '.nautilus' / 'broker_metadata.json'
-token_file = Path.home() / '.zerodha_token.json'
-
-import os
-if not metadata_file.exists() or not token_file.exists():
-    print(json.dumps({{"success": False, "holdings": []}}))
-    sys.exit(0)
-
-with open(metadata_file) as f:
-    metadata = json.load(f)
-api_key = metadata.get('api_key') or os.environ.get('KITE_API_KEY')
-if not api_key:
-    print(json.dumps({{"success": False, "holdings": [], "error": "API key not configured"}}))
-    sys.exit(0)
-
-with open(token_file) as f:
-    token_data = json.load(f)
-access_token = token_data.get('access_token')
-expiry = datetime.fromisoformat(token_data.get('expiry', ''))
-if datetime.now() >= expiry:
-    print(json.dumps({{"success": False, "holdings": []}}))
-    sys.exit(0)
+from auto_login import load_credentials_from_db, get_token_from_db
 
 try:
+    creds = load_credentials_from_db('zerodha')
+    token_data = get_token_from_db('zerodha')
+    if not token_data:
+        print(json.dumps({{"success": False, "holdings": [], "error": "No valid token. Please refresh."}}))
+        sys.exit(0)
+
+    # Check token expiry
+    expiry_ts = token_data.get('expiry')
+    if expiry_ts and datetime.now().timestamp() >= expiry_ts:
+        print(json.dumps({{"success": False, "holdings": [], "error": "Token expired. Please refresh."}}))
+        sys.exit(0)
+
+    api_key = creds['api_key']
+    access_token = token_data['access_token']
+
     api = KiteAPI(api_key, access_token)
     holdings = api.get_holdings()
     print(json.dumps({{"success": True, "holdings": holdings}}))
@@ -440,35 +504,27 @@ async fn get_margins(Json(_req): Json<BrokerIdRequest>) -> impl IntoResponse {
         r#"
 import sys
 import json
-from pathlib import Path
 from datetime import datetime
 sys.path.insert(0, r'{scripts_dir}')
 from kite_api import KiteAPI
-
-metadata_file = Path.home() / '.nautilus' / 'broker_metadata.json'
-token_file = Path.home() / '.zerodha_token.json'
-
-import os
-if not metadata_file.exists() or not token_file.exists():
-    print(json.dumps({{"success": False}}))
-    sys.exit(0)
-
-with open(metadata_file) as f:
-    metadata = json.load(f)
-api_key = metadata.get('api_key') or os.environ.get('KITE_API_KEY')
-if not api_key:
-    print(json.dumps({{"success": False, "error": "API key not configured"}}))
-    sys.exit(0)
-
-with open(token_file) as f:
-    token_data = json.load(f)
-access_token = token_data.get('access_token')
-expiry = datetime.fromisoformat(token_data.get('expiry', ''))
-if datetime.now() >= expiry:
-    print(json.dumps({{"success": False}}))
-    sys.exit(0)
+from auto_login import load_credentials_from_db, get_token_from_db
 
 try:
+    creds = load_credentials_from_db('zerodha')
+    token_data = get_token_from_db('zerodha')
+    if not token_data:
+        print(json.dumps({{"success": False, "error": "No valid token. Please refresh."}}))
+        sys.exit(0)
+
+    # Check token expiry
+    expiry_ts = token_data.get('expiry')
+    if expiry_ts and datetime.now().timestamp() >= expiry_ts:
+        print(json.dumps({{"success": False, "error": "Token expired. Please refresh."}}))
+        sys.exit(0)
+
+    api_key = creds['api_key']
+    access_token = token_data['access_token']
+
     api = KiteAPI(api_key, access_token)
     margins = api.get_margins()
     print(json.dumps({{"success": True, "equity": margins.get('equity'), "commodity": margins.get('commodity')}}))
@@ -514,35 +570,27 @@ async fn get_positions(Json(_req): Json<BrokerIdRequest>) -> impl IntoResponse {
         r#"
 import sys
 import json
-from pathlib import Path
 from datetime import datetime
 sys.path.insert(0, r'{scripts_dir}')
 from kite_api import KiteAPI
-
-metadata_file = Path.home() / '.nautilus' / 'broker_metadata.json'
-token_file = Path.home() / '.zerodha_token.json'
-
-import os
-if not metadata_file.exists() or not token_file.exists():
-    print(json.dumps({{"success": False, "day": [], "net": []}}))
-    sys.exit(0)
-
-with open(metadata_file) as f:
-    metadata = json.load(f)
-api_key = metadata.get('api_key') or os.environ.get('KITE_API_KEY')
-if not api_key:
-    print(json.dumps({{"success": False, "day": [], "net": [], "error": "API key not configured"}}))
-    sys.exit(0)
-
-with open(token_file) as f:
-    token_data = json.load(f)
-access_token = token_data.get('access_token')
-expiry = datetime.fromisoformat(token_data.get('expiry', ''))
-if datetime.now() >= expiry:
-    print(json.dumps({{"success": False, "day": [], "net": []}}))
-    sys.exit(0)
+from auto_login import load_credentials_from_db, get_token_from_db
 
 try:
+    creds = load_credentials_from_db('zerodha')
+    token_data = get_token_from_db('zerodha')
+    if not token_data:
+        print(json.dumps({{"success": False, "day": [], "net": [], "error": "No valid token. Please refresh."}}))
+        sys.exit(0)
+
+    # Check token expiry
+    expiry_ts = token_data.get('expiry')
+    if expiry_ts and datetime.now().timestamp() >= expiry_ts:
+        print(json.dumps({{"success": False, "day": [], "net": [], "error": "Token expired. Please refresh."}}))
+        sys.exit(0)
+
+    api_key = creds['api_key']
+    access_token = token_data['access_token']
+
     api = KiteAPI(api_key, access_token)
     positions = api.get_positions()
     print(json.dumps({{
@@ -661,35 +709,27 @@ async fn get_quotes(Json(req): Json<GetQuotesRequest>) -> impl IntoResponse {
         r#"
 import sys
 import json
-from pathlib import Path
 from datetime import datetime
 sys.path.insert(0, r'{scripts_dir}')
 from kite_api import KiteAPI
-
-metadata_file = Path.home() / '.nautilus' / 'broker_metadata.json'
-token_file = Path.home() / '.zerodha_token.json'
-
-if not metadata_file.exists() or not token_file.exists():
-    print(json.dumps({{"success": False, "quotes": []}}))
-    sys.exit(0)
-
-import os
-with open(metadata_file) as f:
-    metadata = json.load(f)
-api_key = metadata.get('api_key') or os.environ.get('KITE_API_KEY')
-if not api_key:
-    print(json.dumps({{"success": False, "quotes": [], "error": "API key not configured. Re-register broker or set KITE_API_KEY env var."}}))
-    sys.exit(0)
-
-with open(token_file) as f:
-    token_data = json.load(f)
-access_token = token_data.get('access_token')
-expiry = datetime.fromisoformat(token_data.get('expiry', ''))
-if datetime.now() >= expiry:
-    print(json.dumps({{"success": False, "quotes": [], "error": "Token expired"}}))
-    sys.exit(0)
+from auto_login import load_credentials_from_db, get_token_from_db
 
 try:
+    creds = load_credentials_from_db('zerodha')
+    token_data = get_token_from_db('zerodha')
+    if not token_data:
+        print(json.dumps({{"success": False, "quotes": [], "error": "No valid token. Please refresh."}}))
+        sys.exit(0)
+
+    # Check token expiry
+    expiry_ts = token_data.get('expiry')
+    if expiry_ts and datetime.now().timestamp() >= expiry_ts:
+        print(json.dumps({{"success": False, "quotes": [], "error": "Token expired. Please refresh."}}))
+        sys.exit(0)
+
+    api_key = creds['api_key']
+    access_token = token_data['access_token']
+
     api = KiteAPI(api_key, access_token)
     instruments = [{instruments_str}]
     raw_quotes = api.get_quote(instruments)
@@ -797,27 +837,27 @@ async fn place_order(Json(req): Json<PlaceOrderRequest>) -> impl IntoResponse {
         r#"
 import sys
 import json
-import os
+from datetime import datetime
 sys.path.insert(0, r'{scripts_dir}')
 from kite_api import KiteAPI
-
-# Load metadata
-metadata_file = os.path.join(os.path.expanduser('~'), '.nautilus', 'broker_metadata.json')
-if not os.path.exists(metadata_file):
-    print(json.dumps({{"success": False, "error": "Broker not configured"}}))
-    sys.exit(0)
-
-with open(metadata_file) as f:
-    metadata = json.load(f)
-
-api_key = metadata.get('api_key') or os.environ.get('KITE_API_KEY')
-access_token = metadata.get('access_token') or os.environ.get('KITE_ACCESS_TOKEN')
-
-if not api_key or not access_token:
-    print(json.dumps({{"success": False, "error": "API key or access token not configured"}}))
-    sys.exit(0)
+from auto_login import load_credentials_from_db, get_token_from_db
 
 try:
+    creds = load_credentials_from_db('zerodha')
+    token_data = get_token_from_db('zerodha')
+    if not token_data:
+        print(json.dumps({{"success": False, "error": "No valid token. Please refresh."}}))
+        sys.exit(0)
+
+    # Check token expiry
+    expiry_ts = token_data.get('expiry')
+    if expiry_ts and datetime.now().timestamp() >= expiry_ts:
+        print(json.dumps({{"success": False, "error": "Token expired. Please refresh."}}))
+        sys.exit(0)
+
+    api_key = creds['api_key']
+    access_token = token_data['access_token']
+
     kite = KiteAPI(api_key, access_token)
 
     params = {{
@@ -915,26 +955,27 @@ async fn modify_order(Json(req): Json<ModifyOrderRequest>) -> impl IntoResponse 
         r#"
 import sys
 import json
-import os
+from datetime import datetime
 sys.path.insert(0, r'{scripts_dir}')
 from kite_api import KiteAPI
-
-metadata_file = os.path.join(os.path.expanduser('~'), '.nautilus', 'broker_metadata.json')
-if not os.path.exists(metadata_file):
-    print(json.dumps({{"success": False, "error": "Broker not configured"}}))
-    sys.exit(0)
-
-with open(metadata_file) as f:
-    metadata = json.load(f)
-
-api_key = metadata.get('api_key') or os.environ.get('KITE_API_KEY')
-access_token = metadata.get('access_token') or os.environ.get('KITE_ACCESS_TOKEN')
-
-if not api_key or not access_token:
-    print(json.dumps({{"success": False, "error": "API key or access token not configured"}}))
-    sys.exit(0)
+from auto_login import load_credentials_from_db, get_token_from_db
 
 try:
+    creds = load_credentials_from_db('zerodha')
+    token_data = get_token_from_db('zerodha')
+    if not token_data:
+        print(json.dumps({{"success": False, "error": "No valid token. Please refresh."}}))
+        sys.exit(0)
+
+    # Check token expiry
+    expiry_ts = token_data.get('expiry')
+    if expiry_ts and datetime.now().timestamp() >= expiry_ts:
+        print(json.dumps({{"success": False, "error": "Token expired. Please refresh."}}))
+        sys.exit(0)
+
+    api_key = creds['api_key']
+    access_token = token_data['access_token']
+
     kite = KiteAPI(api_key, access_token)
 
     params = {{"order_id": "{order_id}"}}
@@ -996,26 +1037,27 @@ async fn cancel_order(Json(req): Json<CancelOrderRequest>) -> impl IntoResponse 
         r#"
 import sys
 import json
-import os
+from datetime import datetime
 sys.path.insert(0, r'{scripts_dir}')
 from kite_api import KiteAPI
-
-metadata_file = os.path.join(os.path.expanduser('~'), '.nautilus', 'broker_metadata.json')
-if not os.path.exists(metadata_file):
-    print(json.dumps({{"success": False, "error": "Broker not configured"}}))
-    sys.exit(0)
-
-with open(metadata_file) as f:
-    metadata = json.load(f)
-
-api_key = metadata.get('api_key') or os.environ.get('KITE_API_KEY')
-access_token = metadata.get('access_token') or os.environ.get('KITE_ACCESS_TOKEN')
-
-if not api_key or not access_token:
-    print(json.dumps({{"success": False, "error": "API key or access token not configured"}}))
-    sys.exit(0)
+from auto_login import load_credentials_from_db, get_token_from_db
 
 try:
+    creds = load_credentials_from_db('zerodha')
+    token_data = get_token_from_db('zerodha')
+    if not token_data:
+        print(json.dumps({{"success": False, "error": "No valid token. Please refresh."}}))
+        sys.exit(0)
+
+    # Check token expiry
+    expiry_ts = token_data.get('expiry')
+    if expiry_ts and datetime.now().timestamp() >= expiry_ts:
+        print(json.dumps({{"success": False, "error": "Token expired. Please refresh."}}))
+        sys.exit(0)
+
+    api_key = creds['api_key']
+    access_token = token_data['access_token']
+
     kite = KiteAPI(api_key, access_token)
     result = kite.cancel_order("{order_id}")
     print(json.dumps({{"success": True, "orderId": "{order_id}"}}))
@@ -1056,96 +1098,100 @@ except Exception as e:
 // Zerodha Token Management Endpoints
 
 async fn save_zerodha_credentials(
+    State(state): State<AppState>,
     Json(req): Json<SaveCredentialsRequest>,
 ) -> impl IntoResponse {
-    // Get the scripts directory path
-    let scripts_dir = std::env::var("NAUTILUS_SCRIPTS_DIR")
-        .unwrap_or_else(|_| "D:/Nautilus-Trader/scripts/zerodha".to_string());
+    // Create a BrokerRecord with all fields from the request
+    let now = Utc::now().timestamp();
+    let record = BrokerRecord {
+        id: req.broker_id.clone(),
+        name: req.broker_name.clone().unwrap_or_else(|| "Zerodha".to_string()),
+        broker_type: "zerodha".to_string(),
+        api_key: req.api_key.clone(),
+        api_secret: req.api_secret.clone(),
+        user_id: req.user_id.clone(),
+        password: req.password.clone(),
+        totp_secret: if req.totp_secret.is_empty() { None } else { Some(req.totp_secret.clone()) },
+        access_token: None,
+        token_expiry: None,
+        created_at: now,
+        updated_at: now,
+    };
 
-    // Helper to escape single quotes for Python strings
-    fn escape_py(s: &str) -> String {
-        s.replace('\\', "\\\\").replace('\'', "\\'")
+    match state.broker_db.save(&record) {
+        Ok(()) => {
+            tracing::info!("Saved broker credentials for: {}", req.broker_id);
+            Json(SaveCredentialsResponse {
+                success: true,
+                message: "Credentials saved successfully".to_string(),
+            })
+        }
+        Err(e) => {
+            tracing::error!("Failed to save broker credentials: {}", e);
+            Json(SaveCredentialsResponse {
+                success: false,
+                message: format!("Failed to save credentials: {}", e),
+            })
+        }
     }
+}
 
-    // Create a temporary Python script to save credentials
-    let python_code = format!(
-        r#"
-import sys
-sys.path.insert(0, r'{scripts_dir}')
-from credential_store import CredentialStore, ZerodhaCredentials
 
-store = CredentialStore()
-if not store.unlock('{master_password}'):
-    print('UNLOCK_FAILED')
-    sys.exit(1)
+async fn update_broker(
+    State(state): State<AppState>,
+    Json(req): Json<UpdateBrokerRequest>,
+) -> impl IntoResponse {
+    // Check if broker exists
+    match state.broker_db.get(&req.broker_id) {
+        Ok(Some(_)) => {
+            // Build update from request
+            let updates = BrokerUpdate {
+                name: req.broker_name,
+                broker_type: None, // Not updatable via this endpoint
+                api_key: req.api_key,
+                api_secret: req.api_secret,
+                user_id: req.user_id,
+                password: req.password,
+                totp_secret: req.totp_secret.map(|s| if s.is_empty() { None } else { Some(s) }),
+                access_token: None,
+                token_expiry: None,
+            };
 
-creds = ZerodhaCredentials(
-    api_key='{api_key}',
-    api_secret='{api_secret}',
-    user_id='{user_id}',
-    password='{password}',
-    totp_secret='{totp_secret}'
-)
-store.save(creds)
-
-# Also save non-sensitive metadata for UI display and API calls
-import json
-from pathlib import Path
-metadata_file = Path.home() / '.nautilus' / 'broker_metadata.json'
-metadata_file.parent.mkdir(parents=True, exist_ok=True)
-api_key = '{api_key}'
-metadata = {{
-    'broker_id': 'zerodha',
-    'broker_name': '{broker_name}' or 'Zerodha',
-    'api_key': api_key,  # Full key needed for API calls
-    'api_key_prefix': api_key[:8] + '...' if len(api_key) > 8 else api_key,
-    'user_id': '{user_id}'
-}}
-with open(metadata_file, 'w') as f:
-    json.dump(metadata, f)
-
-print('SUCCESS')
-"#,
-        scripts_dir = scripts_dir,
-        master_password = escape_py(&req.master_password),
-        api_key = escape_py(&req.api_key),
-        api_secret = escape_py(&req.api_secret),
-        user_id = escape_py(&req.user_id),
-        password = escape_py(&req.password),
-        totp_secret = escape_py(&req.totp_secret),
-        broker_name = escape_py(req.broker_name.as_deref().unwrap_or("Zerodha"))
-    );
-
-    let output = Command::new("python")
-        .arg("-c")
-        .arg(&python_code)
-        .output();
-
-    match output {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            if stdout.contains("SUCCESS") {
-                Json(SaveCredentialsResponse {
-                    success: true,
-                    message: "Credentials saved successfully".to_string(),
-                })
-            } else if stdout.contains("UNLOCK_FAILED") {
-                Json(SaveCredentialsResponse {
-                    success: false,
-                    message: "Wrong master password or corrupted store. Delete ~/.nautilus/zerodha_creds.enc to reset.".to_string(),
-                })
-            } else {
-                Json(SaveCredentialsResponse {
-                    success: false,
-                    message: format!("Failed to save credentials: {}", stderr),
-                })
+            match state.broker_db.update(&req.broker_id, updates) {
+                Ok(true) => {
+                    tracing::info!("Updated broker: {}", req.broker_id);
+                    Json(UpdateBrokerResponse {
+                        success: true,
+                        message: "Broker updated successfully".to_string(),
+                    })
+                }
+                Ok(false) => {
+                    Json(UpdateBrokerResponse {
+                        success: false,
+                        message: "No fields to update".to_string(),
+                    })
+                }
+                Err(e) => {
+                    tracing::error!("Failed to update broker: {}", e);
+                    Json(UpdateBrokerResponse {
+                        success: false,
+                        message: format!("Failed to update broker: {}", e),
+                    })
+                }
             }
         }
-        Err(e) => Json(SaveCredentialsResponse {
-            success: false,
-            message: format!("Failed to execute Python: {}", e),
-        }),
+        Ok(None) => {
+            Json(UpdateBrokerResponse {
+                success: false,
+                message: "No existing broker configuration found".to_string(),
+            })
+        }
+        Err(e) => {
+            Json(UpdateBrokerResponse {
+                success: false,
+                message: format!("Failed to check broker: {}", e),
+            })
+        }
     }
 }
 
@@ -1155,66 +1201,45 @@ async fn refresh_zerodha_token(
     let scripts_dir = std::env::var("NAUTILUS_SCRIPTS_DIR")
         .unwrap_or_else(|_| "D:/Nautilus-Trader/scripts/zerodha".to_string());
 
-    // Helper to escape single quotes for Python strings
-    fn escape_py(s: &str) -> String {
-        s.replace('\\', "\\\\").replace('\'', "\\'")
-    }
-
+    let broker_id = req.broker_id.as_deref().unwrap_or("zerodha");
     let force_flag = if req.force.unwrap_or(false) { "True" } else { "False" };
-    let escaped_password = escape_py(&req.master_password);
 
     let python_code = format!(
         r#"
 import sys
 import json
 sys.path.insert(0, r'{scripts_dir}')
-from credential_store import CredentialStore
-from auto_login import ZerodhaAutoLogin
-
-store = CredentialStore()
-if not store.unlock('{master_password}'):
-    print(json.dumps({{"success": False, "error": "Invalid master password"}}))
-    sys.exit(0)
-
-creds = store.load()
-if not creds:
-    print(json.dumps({{"success": False, "error": "No credentials found"}}))
-    sys.exit(0)
-
-auth = ZerodhaAutoLogin(
-    api_key=creds.api_key,
-    api_secret=creds.api_secret,
-    user_id=creds.user_id,
-    password=creds.password,
-    totp_secret=creds.totp_secret
-)
+from auto_login import ZerodhaAutoLogin, load_credentials_from_db, save_token_to_db
 
 try:
+    creds = load_credentials_from_db('{broker_id}')
+
+    auth = ZerodhaAutoLogin(
+        api_key=creds['api_key'],
+        api_secret=creds['api_secret'],
+        user_id=creds['user_id'],
+        password=creds['password'],
+        totp_secret=creds['totp_secret']
+    )
+
     token = auth.login(force_refresh={force_flag})
-    # Read expiry from token file
-    import os
-    from pathlib import Path
-    token_file = os.path.expanduser('~/.zerodha_token.json')
-    with open(token_file) as f:
-        data = json.load(f)
 
-    # Update metadata file with full API key for subsequent API calls
-    metadata_file = Path.home() / '.nautilus' / 'broker_metadata.json'
-    if metadata_file.exists():
-        with open(metadata_file) as f:
-            metadata = json.load(f)
-        # Add full api_key if not present
-        if 'api_key' not in metadata or not metadata['api_key']:
-            metadata['api_key'] = creds.api_key
-            with open(metadata_file, 'w') as f:
-                json.dump(metadata, f)
+    # Get expiry from 3:30 AM IST next day
+    import datetime
+    now = datetime.datetime.now()
+    tomorrow = now + datetime.timedelta(days=1)
+    expiry_dt = tomorrow.replace(hour=3, minute=30, second=0, microsecond=0)
+    expiry_ts = int(expiry_dt.timestamp())
 
-    print(json.dumps({{"success": True, "accessToken": token, "expiry": data.get("expiry")}}))
+    save_token_to_db('{broker_id}', token, expiry_ts)
+
+    print(json.dumps({{"success": True, "accessToken": token, "expiry": expiry_ts}}))
 except Exception as e:
-    print(json.dumps({{"success": False, "error": str(e)}}))
+    import traceback
+    print(json.dumps({{"success": False, "error": str(e), "trace": traceback.format_exc()}}))
 "#,
         scripts_dir = scripts_dir,
-        master_password = escaped_password,
+        broker_id = broker_id,
         force_flag = force_flag
     );
 
@@ -1231,7 +1256,7 @@ except Exception as e:
                     Json(RefreshTokenResponse {
                         success: json.get("success").and_then(|v| v.as_bool()).unwrap_or(false),
                         access_token: json.get("accessToken").and_then(|v| v.as_str()).map(String::from),
-                        expiry: json.get("expiry").and_then(|v| v.as_str()).map(String::from),
+                        expiry: json.get("expiry").and_then(|v| v.as_i64()).map(|v| v.to_string()),
                         error: json.get("error").and_then(|v| v.as_str()).map(String::from),
                     })
                 }
@@ -1265,37 +1290,42 @@ async fn get_token_status(
         r#"
 import sys
 import json
-import os
 from datetime import datetime
-from pathlib import Path
 sys.path.insert(0, r'{}')
-from credential_store import CredentialStore
+from auto_login import load_credentials_from_db, get_token_from_db
+
+broker_id = 'zerodha'
 
 # Check if credentials exist
-store = CredentialStore()
-creds_exist = store.exists()
+try:
+    creds = load_credentials_from_db(broker_id)
+    creds_exist = bool(creds and creds.get('api_key'))
+except:
+    creds_exist = False
 
-# Check token status
-token_file = Path.home() / '.zerodha_token.json'
-if token_file.exists():
-    with open(token_file) as f:
-        data = json.load(f)
-    expiry = datetime.fromisoformat(data.get('expiry', ''))
-    now = datetime.now()
-    if now < expiry:
-        remaining = expiry - now
-        hours = remaining.seconds // 3600
-        mins = (remaining.seconds % 3600) // 60
-        print(json.dumps({{
-            "valid": True,
-            "expiry": data.get("expiry"),
-            "expiresIn": f"{{hours}}h {{mins}}m",
-            "credentialsConfigured": creds_exist
-        }}))
+# Check token status from database
+try:
+    token_info = get_token_from_db(broker_id)
+    if token_info and token_info.get('access_token') and token_info.get('expiry'):
+        expiry_ts = token_info['expiry']
+        expiry_dt = datetime.fromtimestamp(expiry_ts)
+        now = datetime.now()
+        if now < expiry_dt:
+            remaining = expiry_dt - now
+            hours = remaining.seconds // 3600
+            mins = (remaining.seconds % 3600) // 60
+            print(json.dumps({{
+                "valid": True,
+                "expiry": expiry_ts,
+                "expiresIn": f"{{hours}}h {{mins}}m",
+                "credentialsConfigured": creds_exist
+            }}))
+        else:
+            print(json.dumps({{"valid": False, "credentialsConfigured": creds_exist}}))
     else:
         print(json.dumps({{"valid": False, "credentialsConfigured": creds_exist}}))
-else:
-    print(json.dumps({{"valid": False, "credentialsConfigured": creds_exist}}))
+except Exception as e:
+    print(json.dumps({{"valid": False, "credentialsConfigured": creds_exist, "error": str(e)}}))
 "#,
         scripts_dir
     );
@@ -1312,7 +1342,7 @@ else:
                 Ok(json) => {
                     Json(TokenStatusResponse {
                         valid: json.get("valid").and_then(|v| v.as_bool()).unwrap_or(false),
-                        expiry: json.get("expiry").and_then(|v| v.as_str()).map(String::from),
+                        expiry: json.get("expiry").and_then(|v| v.as_i64()).map(|v| v.to_string()),
                         expires_in: json.get("expiresIn").and_then(|v| v.as_str()).map(String::from),
                         credentials_configured: json.get("credentialsConfigured").and_then(|v| v.as_bool()).unwrap_or(false),
                     })
@@ -1334,99 +1364,106 @@ else:
     }
 }
 
-// Response for GetBrokerConfig
+// Response for GetBrokerConfig - matches BrokerInfo fields from db
 #[derive(Serialize)]
 struct BrokerConfigResponse {
-    exists: bool,
-    broker_id: Option<String>,
-    broker_name: Option<String>,
-    api_key_prefix: Option<String>,
-    user_id: Option<String>,
-    #[serde(rename = "needsApiKeyUpdate")]
-    needs_api_key_update: bool,
+    pub id: Option<String>,
+    pub name: Option<String>,
+    #[serde(rename = "brokerType")]
+    pub broker_type: Option<String>,
+    #[serde(rename = "hasApiKey")]
+    pub has_api_key: bool,
+    #[serde(rename = "hasApiSecret")]
+    pub has_api_secret: bool,
+    #[serde(rename = "hasCredentials")]
+    pub has_credentials: bool,
+    #[serde(rename = "hasTotp")]
+    pub has_totp: bool,
+    #[serde(rename = "hasToken")]
+    pub has_token: bool,
+    #[serde(rename = "tokenExpiry")]
+    pub token_expiry: Option<i64>,
+    // Legacy fields for backward compatibility
+    pub exists: bool,
+    #[serde(rename = "brokerId")]
+    pub broker_id: Option<String>,
+    #[serde(rename = "brokerName")]
+    pub broker_name: Option<String>,
 }
 
-async fn get_broker_config() -> impl IntoResponse {
-    let scripts_dir = std::env::var("NAUTILUS_SCRIPTS_DIR")
-        .unwrap_or_else(|_| "D:/Nautilus-Trader/scripts/zerodha".to_string());
+// Request for GetBrokerConfig - accepts broker_id parameter
+#[derive(Debug, Deserialize)]
+pub struct GetBrokerConfigRequest {
+    #[serde(rename = "brokerId")]
+    pub broker_id: Option<String>,
+}
 
-    // Read broker metadata from plain JSON file (non-sensitive)
-    let python_code = format!(
-        r#"
-import sys
-import json
-from pathlib import Path
-sys.path.insert(0, r'{}')
+async fn get_broker_config(
+    State(state): State<AppState>,
+    Json(req): Json<GetBrokerConfigRequest>,
+) -> impl IntoResponse {
+    // Default to "zerodha" if no broker_id provided
+    let broker_id = req.broker_id.unwrap_or_else(|| "zerodha".to_string());
 
-# Check broker metadata file
-metadata_file = Path.home() / '.nautilus' / 'broker_metadata.json'
-if metadata_file.exists():
-    with open(metadata_file) as f:
-        data = json.load(f)
-    # Check if full api_key is present (not just prefix)
-    has_full_api_key = 'api_key' in data and data['api_key'] and not data['api_key'].endswith('...')
-    print(json.dumps({{
-        "exists": True,
-        "brokerId": data.get("broker_id", "zerodha"),
-        "brokerName": data.get("broker_name", "Zerodha"),
-        "apiKeyPrefix": data.get("api_key_prefix", ""),
-        "userId": data.get("user_id", ""),
-        "needsApiKeyUpdate": not has_full_api_key
-    }}))
-else:
-    # Check if encrypted credentials exist
-    from credential_store import CredentialStore
-    store = CredentialStore()
-    if store.exists():
-        print(json.dumps({{"exists": True, "brokerId": "zerodha", "brokerName": "Zerodha", "needsApiKeyUpdate": True}}))
-    else:
-        print(json.dumps({{"exists": False, "needsApiKeyUpdate": False}}))
-"#,
-        scripts_dir
-    );
-
-    let output = Command::new("python")
-        .arg("-c")
-        .arg(&python_code)
-        .output();
-
-    match output {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            match serde_json::from_str::<serde_json::Value>(&stdout) {
-                Ok(json) => Json(BrokerConfigResponse {
-                    exists: json.get("exists").and_then(|v| v.as_bool()).unwrap_or(false),
-                    broker_id: json.get("brokerId").and_then(|v| v.as_str()).map(String::from),
-                    broker_name: json.get("brokerName").and_then(|v| v.as_str()).map(String::from),
-                    api_key_prefix: json.get("apiKeyPrefix").and_then(|v| v.as_str()).map(String::from),
-                    user_id: json.get("userId").and_then(|v| v.as_str()).map(String::from),
-                    needs_api_key_update: json.get("needsApiKeyUpdate").and_then(|v| v.as_bool()).unwrap_or(false),
-                }),
-                Err(_) => Json(BrokerConfigResponse {
-                    exists: false,
-                    broker_id: None,
-                    broker_name: None,
-                    api_key_prefix: None,
-                    user_id: None,
-                    needs_api_key_update: false,
-                }),
-            }
+    match state.broker_db.get_info(&broker_id) {
+        Ok(Some(info)) => {
+            Json(BrokerConfigResponse {
+                id: Some(info.id.clone()),
+                name: Some(info.name.clone()),
+                broker_type: Some(info.broker_type.clone()),
+                has_api_key: info.has_api_key,
+                has_api_secret: info.has_api_secret,
+                has_credentials: info.has_credentials,
+                has_totp: info.has_totp,
+                has_token: info.has_token,
+                token_expiry: info.token_expiry,
+                // Legacy fields
+                exists: true,
+                broker_id: Some(info.id),
+                broker_name: Some(info.name),
+            })
         }
-        Err(_) => Json(BrokerConfigResponse {
-            exists: false,
-            broker_id: None,
-            broker_name: None,
-            api_key_prefix: None,
-            user_id: None,
-            needs_api_key_update: false,
-        }),
+        Ok(None) => {
+            Json(BrokerConfigResponse {
+                id: None,
+                name: None,
+                broker_type: None,
+                has_api_key: false,
+                has_api_secret: false,
+                has_credentials: false,
+                has_totp: false,
+                has_token: false,
+                token_expiry: None,
+                exists: false,
+                broker_id: None,
+                broker_name: None,
+            })
+        }
+        Err(e) => {
+            tracing::error!("Failed to get broker config: {}", e);
+            Json(BrokerConfigResponse {
+                id: None,
+                name: None,
+                broker_type: None,
+                has_api_key: false,
+                has_api_secret: false,
+                has_credentials: false,
+                has_totp: false,
+                has_token: false,
+                token_expiry: None,
+                exists: false,
+                broker_id: None,
+                broker_name: None,
+            })
+        }
     }
 }
 
 // Migrate API key from vault to metadata
 #[derive(Debug, Deserialize)]
 pub struct MigrateApiKeyRequest {
-    pub master_password: String,
+    #[serde(rename = "masterPassword", default)]
+    pub master_password: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1789,79 +1826,13 @@ async fn test_ai_connection(
 // Legacy Handlers
 // ============================================================================
 
-async fn migrate_api_key(Json(req): Json<MigrateApiKeyRequest>) -> impl IntoResponse {
-    fn escape_py(s: &str) -> String {
-        s.replace('\\', "\\\\").replace('\'', "\\'")
-    }
-
-    let scripts_dir = std::env::var("NAUTILUS_SCRIPTS_DIR")
-        .unwrap_or_else(|_| "D:/Nautilus-Trader/scripts/zerodha".to_string());
-
-    let python_code = format!(
-        r#"
-import sys
-import json
-from pathlib import Path
-sys.path.insert(0, r'{scripts_dir}')
-from credential_store import CredentialStore
-
-metadata_file = Path.home() / '.nautilus' / 'broker_metadata.json'
-store = CredentialStore()
-
-# Try to unlock vault
-if not store.unlock('{master_password}'):
-    print(json.dumps({{"success": False, "message": "Invalid master password"}}))
-    sys.exit(0)
-
-# Load credentials from vault
-creds = store.load()
-if not creds:
-    print(json.dumps({{"success": False, "message": "No credentials found in vault"}}))
-    sys.exit(0)
-
-# Load and update metadata
-if metadata_file.exists():
-    with open(metadata_file) as f:
-        metadata = json.load(f)
-else:
-    metadata = {{}}
-
-metadata['api_key'] = creds.api_key
-metadata['api_key_prefix'] = creds.api_key[:8] + '...' if len(creds.api_key) > 8 else creds.api_key
-
-with open(metadata_file, 'w') as f:
-    json.dump(metadata, f)
-
-print(json.dumps({{"success": True, "message": "API key migrated successfully"}}))
-"#,
-        scripts_dir = scripts_dir,
-        master_password = escape_py(&req.master_password),
-    );
-
-    let output = Command::new("python")
-        .arg("-c")
-        .arg(&python_code)
-        .output();
-
-    match output {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            match serde_json::from_str::<serde_json::Value>(&stdout) {
-                Ok(json) => Json(MigrateApiKeyResponse {
-                    success: json.get("success").and_then(|v| v.as_bool()).unwrap_or(false),
-                    message: json.get("message").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                }),
-                Err(e) => Json(MigrateApiKeyResponse {
-                    success: false,
-                    message: format!("Parse error: {}", e),
-                }),
-            }
-        }
-        Err(e) => Json(MigrateApiKeyResponse {
-            success: false,
-            message: format!("Failed to run migration: {}", e),
-        }),
-    }
+async fn migrate_api_key(Json(_req): Json<MigrateApiKeyRequest>) -> impl IntoResponse {
+    // This endpoint is deprecated. Credentials are now stored directly in SQLite database.
+    // Use SaveCredentials endpoint instead.
+    Json(MigrateApiKeyResponse {
+        success: false,
+        message: "This migration endpoint is deprecated. Credentials are now stored in SQLite database. Use SaveCredentials instead.".to_string(),
+    })
 }
 
 // ============================================================================
@@ -2212,8 +2183,9 @@ pub fn create_http_router(
     clients: SharedClients,
     ai_service: Arc<AiServiceImpl>,
     backtest_service: Arc<BacktestServiceImpl>,
+    broker_db: Arc<BrokerDb>,
 ) -> Router {
-    let state = AppState { registry, clients, ai_service, backtest_service };
+    let state = AppState { registry, clients, ai_service, backtest_service, broker_db };
     let cors = CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any);
 
     Router::new()
@@ -2233,8 +2205,10 @@ pub fn create_http_router(
         .route("/broker.BrokerService/ListBrokers", post(list_brokers))
         .route("/broker.BrokerService/RegisterBroker", post(register_broker))
         .route("/broker.BrokerService/TestConnection", post(test_connection))
+        .route("/broker.BrokerService/RemoveBroker", post(remove_broker))
         // Zerodha token management
         .route("/broker.BrokerService/SaveCredentials", post(save_zerodha_credentials))
+        .route("/broker.BrokerService/UpdateBroker", post(update_broker))
         .route("/broker.BrokerService/RefreshToken", post(refresh_zerodha_token))
         .route("/broker.BrokerService/GetTokenStatus", post(get_token_status))
         .route("/broker.BrokerService/GetBrokerConfig", post(get_broker_config))

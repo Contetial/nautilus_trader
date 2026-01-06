@@ -19,6 +19,7 @@ use nautilus_grpc_gateway::{
         PortfolioServiceImpl, StrategyServiceImpl,
     },
     backtest_service::BacktestServiceImpl,
+    db::BrokerDb,
     http_api::create_http_router,
     ClientRegistry, SharedClients, start_client_sync,
     GatewayConfig,
@@ -47,10 +48,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create shared registry and client store
     let registry = Arc::new(ClientRegistry::new());
+
+    // Load saved brokers from database
+    match registry.load_saved_brokers().await {
+        Ok(count) => tracing::info!("Loaded {} brokers from database", count),
+        Err(e) => tracing::warn!("Failed to load saved brokers: {}", e),
+    }
+
     let shared_clients = SharedClients::new();
 
     // Start background task to sync registry events to shared clients
     let _sync_handle = start_client_sync(Arc::clone(&registry), shared_clients.clone());
+
+    // Create broker database
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_else(|_| ".".to_string());
+    let db_path = std::path::Path::new(&home).join(".nautilus").join("brokers.db");
+    let broker_db = Arc::new(BrokerDb::new(&db_path).expect("Failed to open broker database"));
+    tracing::info!("Broker database opened at {:?}", db_path);
 
     // Create service implementations with shared state
     let ai_service = Arc::new(AiServiceImpl::new());
@@ -69,6 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         shared_clients,
         Arc::clone(&ai_service),
         Arc::clone(&backtest_service),
+        Arc::clone(&broker_db),
     );
 
     // Start HTTP server

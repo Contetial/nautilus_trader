@@ -1,4 +1,4 @@
-[package]
+﻿[package]
 name = "nautilus-grpc-gateway"
 readme = "README.md"
 publish = false
@@ -69,6 +69,13 @@ uuid = { version = "1.11", features = ["v4"] }
 # Async utilities
 async-stream = "0.3"
 futures = "0.3"
+async-trait = "0.1"
+
+# SQLite for broker persistence
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Cross-platform directories
+directories = "5.0"
 
 [build-dependencies]
 tonic-build = { workspace = true }

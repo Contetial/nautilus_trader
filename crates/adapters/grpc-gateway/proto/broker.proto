@@ -40,6 +40,9 @@ message BrokerStatus {
   ConnectionState state = 3;
   string error_message = 4;
   int64 last_connected_timestamp = 5;
+  bool has_totp = 6;  // Indicates if TOTP secret is configured
+  string api_key = 7;  // API key (not secret)
+  string client_id = 8;  // Client ID (not secret)
 }
 
 enum ConnectionState {

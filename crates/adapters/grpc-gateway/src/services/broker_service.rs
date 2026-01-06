@@ -69,6 +69,9 @@ impl BrokerService for BrokerServiceImpl {
                 state: Self::to_proto_state(info.state).into(),
                 error_message: info.error_message.clone().unwrap_or_default(),
                 last_connected_timestamp: info.last_connected.unwrap_or(0) as i64,
+                has_totp: info.has_totp,
+                api_key: info.api_key.clone(),
+                client_id: info.user_id.clone(),
             })
             .collect();
 
@@ -90,6 +93,18 @@ impl BrokerService for BrokerServiceImpl {
             )));
         }
 
+        // Extract credentials for persistence
+        let api_secret = config.credentials.get("api_secret")
+            .ok_or_else(|| Status::invalid_argument("Missing api_secret in credentials"))?
+            .clone();
+        let user_id = config.credentials.get("user_id")
+            .cloned()
+            .unwrap_or_default();
+        let password = config.credentials.get("password")
+            .cloned()
+            .unwrap_or_default();
+        let totp_secret = config.credentials.get("totp_secret").cloned();
+
         // Create Zerodha config
         let zerodha_config = Self::create_zerodha_config(&config)?;
 
@@ -99,6 +114,10 @@ impl BrokerService for BrokerServiceImpl {
             config.name.clone(),
             config.broker_type.clone(),
             zerodha_config,
+            api_secret,
+            user_id,
+            password,
+            totp_secret,
         ).await
             .map_err(|e| Status::internal(e))?;
 
@@ -108,6 +127,9 @@ impl BrokerService for BrokerServiceImpl {
             state: Self::to_proto_state(info.state).into(),
             error_message: info.error_message.unwrap_or_default(),
             last_connected_timestamp: info.last_connected.unwrap_or(0) as i64,
+            has_totp: info.has_totp,
+            api_key: info.api_key.clone(),
+            client_id: info.user_id.clone(),
         }))
     }
 
@@ -173,6 +195,9 @@ impl BrokerService for BrokerServiceImpl {
                 state: Self::to_proto_state(info.state).into(),
                 error_message: info.error_message.unwrap_or_default(),
                 last_connected_timestamp: info.last_connected.unwrap_or(0) as i64,
+                has_totp: info.has_totp,
+                api_key: info.api_key.clone(),
+                client_id: info.user_id.clone(),
             };
 
             let _ = tx.send(Ok(status)).await;

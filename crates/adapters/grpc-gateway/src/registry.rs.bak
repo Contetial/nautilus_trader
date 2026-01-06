@@ -9,8 +9,6 @@ use tokio::sync::{RwLock, broadcast};
 
 use nautilus_zerodha::{ZerodhaConfig, ZerodhaHttpClient};
 
-use crate::db::{BrokerDb, BrokerRecord};
-
 /// Event emitted when broker state changes
 #[derive(Debug, Clone)]
 pub enum BrokerEvent {
@@ -43,19 +41,6 @@ pub struct BrokerInfo {
     pub state: ConnectionState,
     pub last_connected: Option<u64>,
     pub error_message: Option<String>,
-    pub has_totp: bool,
-    pub api_key: String,
-    pub user_id: String,
-}
-
-/// Get the default database path (~/.nautilus/brokers.db)
-fn get_default_db_path() -> anyhow::Result<std::path::PathBuf> {
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .map_err(|_| anyhow::anyhow!("Failed to determine home directory"))?;
-    Ok(std::path::PathBuf::from(home)
-        .join(".nautilus")
-        .join("brokers.db"))
 }
 
 /// Internal broker connection data
@@ -75,8 +60,6 @@ pub struct ClientRegistry {
     brokers: RwLock<HashMap<String, BrokerConnection>>,
     /// Event broadcast channel
     event_tx: broadcast::Sender<BrokerEvent>,
-    /// Database for persistence
-    db: Option<BrokerDb>,
 }
 
 impl std::fmt::Debug for ClientRegistry {
@@ -92,85 +75,13 @@ impl Default for ClientRegistry {
 }
 
 impl ClientRegistry {
-    /// Create a new client registry with database persistence
+    /// Create a new client registry
     pub fn new() -> Self {
         let (event_tx, _) = broadcast::channel(64);
-
-        // Try to initialize database
-        let db = match get_default_db_path() {
-            Ok(path) => match BrokerDb::new(&path) {
-                Ok(db) => {
-                    tracing::info!("Broker database initialized at {:?}", path);
-                    Some(db)
-                }
-                Err(e) => {
-                    tracing::error!("Failed to initialize broker database: {}", e);
-                    None
-                }
-            },
-            Err(e) => {
-                tracing::error!("Failed to determine database path: {}", e);
-                None
-            }
-        };
-
         Self {
             brokers: RwLock::new(HashMap::new()),
             event_tx,
-            db,
         }
-    }
-
-    /// Load saved brokers from database and register them
-    pub async fn load_saved_brokers(&self) -> Result<usize, String> {
-        let db = self.db.as_ref().ok_or("Database not available")?;
-
-        let saved = db.list().map_err(|e| e.to_string())?;
-        let mut loaded = 0;
-
-        for info in saved {
-            // Get full record with secrets
-            if let Ok(Some(record)) = db.get(&info.id) {
-                // Only load Zerodha brokers for now
-                if record.broker_type.to_lowercase() == "zerodha" {
-                    let config = ZerodhaConfig::new(
-                        record.api_key.clone(),
-                        record.api_secret.clone(),
-                        record.access_token.clone(),
-                    );
-
-                    match ZerodhaHttpClient::new(config.clone()) {
-                        Ok(client) => {
-                            let broker_info = BrokerInfo {
-                                id: record.id.clone(),
-                                name: record.name.clone(),
-                                broker_type: record.broker_type.clone(),
-                                state: ConnectionState::Offline,
-                                last_connected: None,
-                                error_message: None,
-                                has_totp: record.totp_secret.is_some(),
-                                api_key: record.api_key.clone(),
-                                user_id: record.user_id.clone(),
-                            };
-
-                            let mut brokers = self.brokers.write().await;
-                            brokers.insert(record.id.clone(), BrokerConnection {
-                                info: broker_info,
-                                config,
-                                client: Arc::new(client),
-                            });
-                            loaded += 1;
-                            tracing::info!("Loaded broker from database: {}", record.id);
-                        }
-                        Err(e) => {
-                            tracing::warn!("Failed to create client for {}: {}", record.id, e);
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(loaded)
     }
 
     /// Subscribe to broker events
@@ -181,52 +92,25 @@ impl ClientRegistry {
     /// Add a new broker connection
     ///
     /// Creates a ZerodhaHttpClient from the provided configuration and
-    /// registers it with the given broker_id. Persists to database if available.
+    /// registers it with the given broker_id.
     pub async fn add_broker(
         &self,
         broker_id: String,
         name: String,
         broker_type: String,
         config: ZerodhaConfig,
-        api_secret: String,
-        user_id: String,
-        password: String,
-        totp_secret: Option<String>,
     ) -> Result<BrokerInfo, String> {
         let client = ZerodhaHttpClient::new(config.clone())
             .map_err(|e| format!("Failed to create client: {}", e))?;
 
         let info = BrokerInfo {
             id: broker_id.clone(),
-            name: name.clone(),
-            broker_type: broker_type.clone(),
+            name,
+            broker_type,
             state: ConnectionState::Offline,
             last_connected: None,
             error_message: None,
-            has_totp: totp_secret.is_some(),
-            api_key: config.api_key.clone(),
-            user_id: user_id.clone(),
         };
-
-        // Save to database
-        if let Some(db) = &self.db {
-            let record = BrokerRecord {
-                id: broker_id.clone(),
-                name: name.clone(),
-                broker_type: broker_type.clone(),
-                api_key: config.api_key.clone(),
-                api_secret,
-                user_id,
-                password,
-                totp_secret,
-                access_token: config.access_token.clone(),
-                token_expiry: None,
-                created_at: 0,
-                updated_at: 0,
-            };
-            db.save(&record).map_err(|e| format!("Failed to save broker: {}", e))?;
-            tracing::info!("Broker saved to database: {}", broker_id);
-        }
 
         let mut brokers = self.brokers.write().await;
         brokers.insert(broker_id, BrokerConnection {
@@ -242,13 +126,6 @@ impl ClientRegistry {
     pub async fn remove_broker(&self, broker_id: &str) -> bool {
         let mut brokers = self.brokers.write().await;
         if brokers.remove(broker_id).is_some() {
-            // Delete from database
-            if let Some(db) = &self.db {
-                if let Err(e) = db.delete(broker_id) {
-                    tracing::error!("Failed to delete broker from database: {}", e);
-                }
-            }
-
             // Notify subscribers
             let _ = self.event_tx.send(BrokerEvent::Disconnected {
                 broker_id: broker_id.to_string(),

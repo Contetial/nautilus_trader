@@ -7,6 +7,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tonic::{Request, Response, Status};
 
+use crate::db::BrokerDb;
 use crate::proto::ai::{
     ai_service_server::AiService,
     AiModel, AiProvider,
@@ -72,6 +73,7 @@ USER REQUEST:
 pub struct AiServiceImpl {
     config: Arc<RwLock<AiConfig>>,
     http_client: reqwest::Client,
+    db: Option<BrokerDb>,
 }
 
 impl std::fmt::Debug for AiServiceImpl {
@@ -80,16 +82,73 @@ impl std::fmt::Debug for AiServiceImpl {
     }
 }
 
+/// Get the default database path (~/.nautilus/brokers.db)
+fn get_default_db_path() -> anyhow::Result<std::path::PathBuf> {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .map_err(|_| anyhow::anyhow!("Failed to determine home directory"))?;
+    Ok(std::path::PathBuf::from(home)
+        .join(".nautilus")
+        .join("brokers.db"))
+}
+
 impl AiServiceImpl {
     pub fn new() -> Self {
+        // Try to initialize database and load saved config
+        let (db, initial_config) = match get_default_db_path().and_then(|path| BrokerDb::new(&path)) {
+            Ok(db) => {
+                // Try to load saved config from database
+                let config = match db.get_all_ai_config() {
+                    Ok(saved) => {
+                        tracing::info!("Loading AI config from database ({} keys)", saved.len());
+                        AiConfig {
+                            default_provider: saved.get("default_provider")
+                                .cloned()
+                                .unwrap_or_else(|| "groq".to_string()),
+                            groq_api_key: saved.get("groq_api_key").cloned(),
+                            groq_default_model: saved.get("groq_default_model")
+                                .cloned()
+                                .unwrap_or_else(|| "llama-3.3-70b-versatile".to_string()),
+                            claude_api_key: saved.get("claude_api_key").cloned(),
+                            claude_default_model: saved.get("claude_default_model")
+                                .cloned()
+                                .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string()),
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to load AI config from database: {}", e);
+                        AiConfig {
+                            default_provider: "groq".to_string(),
+                            groq_default_model: "llama-3.3-70b-versatile".to_string(),
+                            claude_default_model: "claude-sonnet-4-20250514".to_string(),
+                            ..Default::default()
+                        }
+                    }
+                };
+                (Some(db), config)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to initialize AI config database: {}", e);
+                (None, AiConfig {
+                    default_provider: "groq".to_string(),
+                    groq_default_model: "llama-3.3-70b-versatile".to_string(),
+                    claude_default_model: "claude-sonnet-4-20250514".to_string(),
+                    ..Default::default()
+                })
+            }
+        };
+
+        if initial_config.groq_api_key.is_some() {
+            tracing::info!("Groq API key loaded from database");
+        }
+        if initial_config.claude_api_key.is_some() {
+            tracing::info!("Claude API key loaded from database");
+        }
+
         Self {
-            config: Arc::new(RwLock::new(AiConfig {
-                default_provider: "groq".to_string(),
-                groq_default_model: "llama-3.3-70b-versatile".to_string(),
-                claude_default_model: "claude-sonnet-4-20250514".to_string(),
-                ..Default::default()
-            })),
+            config: Arc::new(RwLock::new(initial_config)),
             http_client: reqwest::Client::new(),
+            db,
         }
     }
 
@@ -491,21 +550,44 @@ impl AiService for AiServiceImpl {
         match req.provider.as_str() {
             "groq" => {
                 if !req.api_key.is_empty() {
-                    config.groq_api_key = Some(req.api_key);
+                    config.groq_api_key = Some(req.api_key.clone());
+                    // Persist to database
+                    if let Some(db) = &self.db {
+                        if let Err(e) = db.save_ai_config("groq_api_key", &req.api_key) {
+                            tracing::error!("Failed to persist Groq API key: {}", e);
+                        }
+                    }
                 }
                 if !req.default_model.is_empty() {
-                    config.groq_default_model = req.default_model;
+                    config.groq_default_model = req.default_model.clone();
+                    if let Some(db) = &self.db {
+                        let _ = db.save_ai_config("groq_default_model", &req.default_model);
+                    }
                 }
                 config.default_provider = "groq".to_string();
+                if let Some(db) = &self.db {
+                    let _ = db.save_ai_config("default_provider", "groq");
+                }
             }
             "claude" => {
                 if !req.api_key.is_empty() {
-                    config.claude_api_key = Some(req.api_key);
+                    config.claude_api_key = Some(req.api_key.clone());
+                    if let Some(db) = &self.db {
+                        if let Err(e) = db.save_ai_config("claude_api_key", &req.api_key) {
+                            tracing::error!("Failed to persist Claude API key: {}", e);
+                        }
+                    }
                 }
                 if !req.default_model.is_empty() {
-                    config.claude_default_model = req.default_model;
+                    config.claude_default_model = req.default_model.clone();
+                    if let Some(db) = &self.db {
+                        let _ = db.save_ai_config("claude_default_model", &req.default_model);
+                    }
                 }
                 config.default_provider = "claude".to_string();
+                if let Some(db) = &self.db {
+                    let _ = db.save_ai_config("default_provider", "claude");
+                }
             }
             _ => {
                 return Ok(Response::new(SaveAiConfigResponse {
@@ -515,6 +597,7 @@ impl AiService for AiServiceImpl {
             }
         }
 
+        tracing::info!("AI config saved successfully for provider: {}", req.provider);
         Ok(Response::new(SaveAiConfigResponse {
             success: true,
             error: String::new(),
