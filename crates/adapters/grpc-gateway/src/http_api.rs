@@ -26,6 +26,10 @@ pub struct BrokerInfo {
     pub id: String,
     pub name: String,
     pub state: i32,
+    #[serde(rename = "hasTotp")]
+    pub has_totp: bool,
+    #[serde(rename = "brokerType")]
+    pub broker_type: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -35,6 +39,7 @@ pub struct BrokerListResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct BrokerIdRequest {
+    #[serde(alias = "brokerId")]
     pub broker_id: Option<String>,
     pub id: Option<String>,
 }
@@ -264,6 +269,8 @@ async fn list_brokers(State(state): State<AppState>) -> impl IntoResponse {
                     id: b.id,
                     name: b.name,
                     state: if b.has_token { 1 } else { 0 }, // 1 = connected, 0 = disconnected
+                    has_totp: b.has_totp,
+                    broker_type: b.broker_type,
                 })
                 .collect();
             Json(BrokerListResponse { brokers })
@@ -273,7 +280,13 @@ async fn list_brokers(State(state): State<AppState>) -> impl IntoResponse {
             // Fall back to registry
             let brokers: Vec<BrokerInfo> = state.registry.list_brokers().await
                 .into_iter()
-                .map(|b| BrokerInfo { id: b.id, name: b.name, state: b.state as i32 })
+                .map(|b| BrokerInfo {
+                    id: b.id.clone(),
+                    name: b.name,
+                    state: b.state as i32,
+                    has_totp: false,
+                    broker_type: b.id,
+                })
                 .collect();
             Json(BrokerListResponse { brokers })
         }
@@ -429,22 +442,110 @@ except Exception as e:
     }
 }
 
-async fn get_holdings(Json(_req): Json<BrokerIdRequest>) -> impl IntoResponse {
-    let scripts_dir = std::env::var("NAUTILUS_SCRIPTS_DIR")
-        .unwrap_or_else(|_| "D:/Nautilus-Trader/scripts/zerodha".to_string());
+async fn get_holdings(
+    State(state): State<AppState>,
+    Json(req): Json<BrokerIdRequest>,
+) -> impl IntoResponse {
+    let base_scripts_dir = std::env::var("NAUTILUS_SCRIPTS_BASE")
+        .unwrap_or_else(|_| "D:/Nautilus-Trader/scripts".to_string());
 
-    let python_code = format!(
-        r#"
+    let broker_id = req.broker_id.or(req.id).unwrap_or_else(|| "zerodha".to_string());
+
+    // Determine broker type from database
+    let broker_type = match state.broker_db.get_info(&broker_id) {
+        Ok(Some(info)) => info.broker_type,
+        _ => {
+            if broker_id.contains("kotak") { "kotak_neo".to_string() }
+            else if broker_id.contains("icici") { "icici_direct".to_string() }
+            else { "zerodha".to_string() }
+        }
+    };
+
+    let python_code = match broker_type.as_str() {
+        "kotak_neo" => format!(
+            r#"
 import sys
 import json
 from datetime import datetime
-sys.path.insert(0, r'{scripts_dir}')
+sys.path.insert(0, r'{base_scripts_dir}/kotak')
+from kotak_api import KotakNeoAPI, load_credentials_from_db, get_token_from_db
+
+try:
+    creds = load_credentials_from_db('{broker_id}')
+    token_data = get_token_from_db('{broker_id}')
+    if not token_data:
+        print(json.dumps({{"success": False, "holdings": [], "error": "No valid token. Please refresh."}}))
+        sys.exit(0)
+
+    api = KotakNeoAPI(
+        consumer_key=creds['consumer_key'],
+        access_token=token_data['access_token']
+    )
+    api.initialize()
+    result = api.get_holdings()
+
+    if result['success']:
+        # Normalize holdings to common format
+        holdings = result.get('data', [])
+        if isinstance(holdings, dict):
+            holdings = holdings.get('data', [])
+        print(json.dumps({{"success": True, "holdings": holdings}}))
+    else:
+        print(json.dumps({{"success": False, "holdings": [], "error": result.get('error', 'Failed')}}))
+except Exception as e:
+    print(json.dumps({{"success": False, "holdings": [], "error": str(e)}}))
+"#,
+            base_scripts_dir = base_scripts_dir,
+            broker_id = broker_id
+        ),
+        "icici_direct" => format!(
+            r#"
+import sys
+import json
+from datetime import datetime
+sys.path.insert(0, r'{base_scripts_dir}/icici')
+from icici_api import IciciDirectAPI, load_credentials_from_db, get_token_from_db
+
+try:
+    creds = load_credentials_from_db('{broker_id}')
+    token_data = get_token_from_db('{broker_id}')
+    if not token_data:
+        print(json.dumps({{"success": False, "holdings": [], "error": "No valid token. Please refresh."}}))
+        sys.exit(0)
+
+    api = IciciDirectAPI(
+        api_key=creds['api_key'],
+        api_secret=creds['api_secret'],
+        session_token=token_data['access_token']
+    )
+    api.initialize()
+    api.generate_session(token_data['access_token'])
+    result = api.get_holdings()
+
+    if result['success']:
+        # Normalize holdings to common format
+        holdings = result.get('data', {{}}).get('Success', [])
+        print(json.dumps({{"success": True, "holdings": holdings}}))
+    else:
+        print(json.dumps({{"success": False, "holdings": [], "error": result.get('error', 'Failed')}}))
+except Exception as e:
+    print(json.dumps({{"success": False, "holdings": [], "error": str(e)}}))
+"#,
+            base_scripts_dir = base_scripts_dir,
+            broker_id = broker_id
+        ),
+        _ => format!(
+            r#"
+import sys
+import json
+from datetime import datetime
+sys.path.insert(0, r'{base_scripts_dir}/zerodha')
 from kite_api import KiteAPI
 from auto_login import load_credentials_from_db, get_token_from_db
 
 try:
-    creds = load_credentials_from_db('zerodha')
-    token_data = get_token_from_db('zerodha')
+    creds = load_credentials_from_db('{broker_id}')
+    token_data = get_token_from_db('{broker_id}')
     if not token_data:
         print(json.dumps({{"success": False, "holdings": [], "error": "No valid token. Please refresh."}}))
         sys.exit(0)
@@ -464,8 +565,10 @@ try:
 except Exception as e:
     print(json.dumps({{"success": False, "holdings": [], "error": str(e)}}))
 "#,
-        scripts_dir = scripts_dir
-    );
+            base_scripts_dir = base_scripts_dir,
+            broker_id = broker_id
+        ),
+    };
 
     let output = Command::new("python")
         .arg("-c")
@@ -496,22 +599,105 @@ pub struct MarginsResponse {
     pub commodity: Option<serde_json::Value>,
 }
 
-async fn get_margins(Json(_req): Json<BrokerIdRequest>) -> impl IntoResponse {
-    let scripts_dir = std::env::var("NAUTILUS_SCRIPTS_DIR")
-        .unwrap_or_else(|_| "D:/Nautilus-Trader/scripts/zerodha".to_string());
+async fn get_margins(
+    State(state): State<AppState>,
+    Json(req): Json<BrokerIdRequest>,
+) -> impl IntoResponse {
+    let base_scripts_dir = std::env::var("NAUTILUS_SCRIPTS_BASE")
+        .unwrap_or_else(|_| "D:/Nautilus-Trader/scripts".to_string());
 
-    let python_code = format!(
-        r#"
+    let broker_id = req.broker_id.or(req.id).unwrap_or_else(|| "zerodha".to_string());
+
+    // Determine broker type from database
+    let broker_type = match state.broker_db.get_info(&broker_id) {
+        Ok(Some(info)) => info.broker_type,
+        _ => {
+            if broker_id.contains("kotak") { "kotak_neo".to_string() }
+            else if broker_id.contains("icici") { "icici_direct".to_string() }
+            else { "zerodha".to_string() }
+        }
+    };
+
+    let python_code = match broker_type.as_str() {
+        "kotak_neo" => format!(
+            r#"
+import sys
+import json
+sys.path.insert(0, r'{base_scripts_dir}/kotak')
+from kotak_api import KotakNeoAPI, load_credentials_from_db, get_token_from_db
+
+try:
+    creds = load_credentials_from_db('{broker_id}')
+    token_data = get_token_from_db('{broker_id}')
+    if not token_data:
+        print(json.dumps({{"success": False, "error": "No valid token. Please refresh."}}))
+        sys.exit(0)
+
+    api = KotakNeoAPI(
+        consumer_key=creds['consumer_key'],
+        access_token=token_data['access_token']
+    )
+    api.initialize()
+    result = api.get_margins()
+
+    if result['success']:
+        data = result.get('data', {{}})
+        # Normalize to common format
+        print(json.dumps({{"success": True, "equity": data, "commodity": None}}))
+    else:
+        print(json.dumps({{"success": False, "error": result.get('error', 'Failed')}}))
+except Exception as e:
+    print(json.dumps({{"success": False, "error": str(e)}}))
+"#,
+            base_scripts_dir = base_scripts_dir,
+            broker_id = broker_id
+        ),
+        "icici_direct" => format!(
+            r#"
+import sys
+import json
+sys.path.insert(0, r'{base_scripts_dir}/icici')
+from icici_api import IciciDirectAPI, load_credentials_from_db, get_token_from_db
+
+try:
+    creds = load_credentials_from_db('{broker_id}')
+    token_data = get_token_from_db('{broker_id}')
+    if not token_data:
+        print(json.dumps({{"success": False, "error": "No valid token. Please refresh."}}))
+        sys.exit(0)
+
+    api = IciciDirectAPI(
+        api_key=creds['api_key'],
+        api_secret=creds['api_secret'],
+        session_token=token_data['access_token']
+    )
+    api.initialize()
+    api.generate_session(token_data['access_token'])
+    result = api.get_margins()
+
+    if result['success']:
+        data = result.get('data', {{}})
+        print(json.dumps({{"success": True, "equity": data, "commodity": None}}))
+    else:
+        print(json.dumps({{"success": False, "error": result.get('error', 'Failed')}}))
+except Exception as e:
+    print(json.dumps({{"success": False, "error": str(e)}}))
+"#,
+            base_scripts_dir = base_scripts_dir,
+            broker_id = broker_id
+        ),
+        _ => format!(
+            r#"
 import sys
 import json
 from datetime import datetime
-sys.path.insert(0, r'{scripts_dir}')
+sys.path.insert(0, r'{base_scripts_dir}/zerodha')
 from kite_api import KiteAPI
 from auto_login import load_credentials_from_db, get_token_from_db
 
 try:
-    creds = load_credentials_from_db('zerodha')
-    token_data = get_token_from_db('zerodha')
+    creds = load_credentials_from_db('{broker_id}')
+    token_data = get_token_from_db('{broker_id}')
     if not token_data:
         print(json.dumps({{"success": False, "error": "No valid token. Please refresh."}}))
         sys.exit(0)
@@ -531,8 +717,10 @@ try:
 except Exception as e:
     print(json.dumps({{"success": False, "error": str(e)}}))
 "#,
-        scripts_dir = scripts_dir
-    );
+            base_scripts_dir = base_scripts_dir,
+            broker_id = broker_id
+        ),
+    };
 
     let output = Command::new("python")
         .arg("-c")
@@ -562,22 +750,106 @@ pub struct PositionsResponse {
     pub net: Vec<serde_json::Value>,
 }
 
-async fn get_positions(Json(_req): Json<BrokerIdRequest>) -> impl IntoResponse {
-    let scripts_dir = std::env::var("NAUTILUS_SCRIPTS_DIR")
-        .unwrap_or_else(|_| "D:/Nautilus-Trader/scripts/zerodha".to_string());
+async fn get_positions(
+    State(state): State<AppState>,
+    Json(req): Json<BrokerIdRequest>,
+) -> impl IntoResponse {
+    let base_scripts_dir = std::env::var("NAUTILUS_SCRIPTS_BASE")
+        .unwrap_or_else(|_| "D:/Nautilus-Trader/scripts".to_string());
 
-    let python_code = format!(
-        r#"
+    let broker_id = req.broker_id.or(req.id).unwrap_or_else(|| "zerodha".to_string());
+
+    // Determine broker type from database
+    let broker_type = match state.broker_db.get_info(&broker_id) {
+        Ok(Some(info)) => info.broker_type,
+        _ => {
+            if broker_id.contains("kotak") { "kotak_neo".to_string() }
+            else if broker_id.contains("icici") { "icici_direct".to_string() }
+            else { "zerodha".to_string() }
+        }
+    };
+
+    let python_code = match broker_type.as_str() {
+        "kotak_neo" => format!(
+            r#"
+import sys
+import json
+sys.path.insert(0, r'{base_scripts_dir}/kotak')
+from kotak_api import KotakNeoAPI, load_credentials_from_db, get_token_from_db
+
+try:
+    creds = load_credentials_from_db('{broker_id}')
+    token_data = get_token_from_db('{broker_id}')
+    if not token_data:
+        print(json.dumps({{"success": False, "day": [], "net": [], "error": "No valid token. Please refresh."}}))
+        sys.exit(0)
+
+    api = KotakNeoAPI(
+        consumer_key=creds['consumer_key'],
+        access_token=token_data['access_token']
+    )
+    api.initialize()
+    result = api.get_positions()
+
+    if result['success']:
+        data = result.get('data', [])
+        if isinstance(data, dict):
+            data = data.get('data', [])
+        print(json.dumps({{"success": True, "day": data, "net": data}}))
+    else:
+        print(json.dumps({{"success": False, "day": [], "net": [], "error": result.get('error', 'Failed')}}))
+except Exception as e:
+    print(json.dumps({{"success": False, "day": [], "net": [], "error": str(e)}}))
+"#,
+            base_scripts_dir = base_scripts_dir,
+            broker_id = broker_id
+        ),
+        "icici_direct" => format!(
+            r#"
+import sys
+import json
+sys.path.insert(0, r'{base_scripts_dir}/icici')
+from icici_api import IciciDirectAPI, load_credentials_from_db, get_token_from_db
+
+try:
+    creds = load_credentials_from_db('{broker_id}')
+    token_data = get_token_from_db('{broker_id}')
+    if not token_data:
+        print(json.dumps({{"success": False, "day": [], "net": [], "error": "No valid token. Please refresh."}}))
+        sys.exit(0)
+
+    api = IciciDirectAPI(
+        api_key=creds['api_key'],
+        api_secret=creds['api_secret'],
+        session_token=token_data['access_token']
+    )
+    api.initialize()
+    api.generate_session(token_data['access_token'])
+    result = api.get_positions()
+
+    if result['success']:
+        data = result.get('data', {{}}).get('Success', [])
+        print(json.dumps({{"success": True, "day": data, "net": data}}))
+    else:
+        print(json.dumps({{"success": False, "day": [], "net": [], "error": result.get('error', 'Failed')}}))
+except Exception as e:
+    print(json.dumps({{"success": False, "day": [], "net": [], "error": str(e)}}))
+"#,
+            base_scripts_dir = base_scripts_dir,
+            broker_id = broker_id
+        ),
+        _ => format!(
+            r#"
 import sys
 import json
 from datetime import datetime
-sys.path.insert(0, r'{scripts_dir}')
+sys.path.insert(0, r'{base_scripts_dir}/zerodha')
 from kite_api import KiteAPI
 from auto_login import load_credentials_from_db, get_token_from_db
 
 try:
-    creds = load_credentials_from_db('zerodha')
-    token_data = get_token_from_db('zerodha')
+    creds = load_credentials_from_db('{broker_id}')
+    token_data = get_token_from_db('{broker_id}')
     if not token_data:
         print(json.dumps({{"success": False, "day": [], "net": [], "error": "No valid token. Please refresh."}}))
         sys.exit(0)
@@ -601,8 +873,10 @@ try:
 except Exception as e:
     print(json.dumps({{"success": False, "day": [], "net": [], "error": str(e)}}))
 "#,
-        scripts_dir = scripts_dir
-    );
+            base_scripts_dir = base_scripts_dir,
+            broker_id = broker_id
+        ),
+    };
 
     let output = Command::new("python")
         .arg("-c")
@@ -1101,12 +1375,19 @@ async fn save_zerodha_credentials(
     State(state): State<AppState>,
     Json(req): Json<SaveCredentialsRequest>,
 ) -> impl IntoResponse {
+    // Determine broker type and name based on broker_id
+    let (broker_type, default_name) = match req.broker_id.as_str() {
+        "kotak_neo" => ("kotak_neo", "Kotak Neo"),
+        "icici_direct" => ("icici_direct", "ICICI Direct"),
+        _ => ("zerodha", "Zerodha"),
+    };
+
     // Create a BrokerRecord with all fields from the request
     let now = Utc::now().timestamp();
     let record = BrokerRecord {
         id: req.broker_id.clone(),
-        name: req.broker_name.clone().unwrap_or_else(|| "Zerodha".to_string()),
-        broker_type: "zerodha".to_string(),
+        name: req.broker_name.clone().unwrap_or_else(|| default_name.to_string()),
+        broker_type: broker_type.to_string(),
         api_key: req.api_key.clone(),
         api_secret: req.api_secret.clone(),
         user_id: req.user_id.clone(),
@@ -1196,19 +1477,110 @@ async fn update_broker(
 }
 
 async fn refresh_zerodha_token(
+    State(state): State<AppState>,
     Json(req): Json<RefreshTokenRequest>,
 ) -> impl IntoResponse {
-    let scripts_dir = std::env::var("NAUTILUS_SCRIPTS_DIR")
-        .unwrap_or_else(|_| "D:/Nautilus-Trader/scripts/zerodha".to_string());
+    let base_scripts_dir = std::env::var("NAUTILUS_SCRIPTS_BASE")
+        .unwrap_or_else(|_| "D:/Nautilus-Trader/scripts".to_string());
 
     let broker_id = req.broker_id.as_deref().unwrap_or("zerodha");
     let force_flag = if req.force.unwrap_or(false) { "True" } else { "False" };
 
-    let python_code = format!(
-        r#"
+    // Determine broker type from database or from broker_id
+    let broker_type = match state.broker_db.get_info(broker_id) {
+        Ok(Some(info)) => info.broker_type,
+        _ => {
+            // Infer from broker_id
+            if broker_id.contains("kotak") { "kotak_neo".to_string() }
+            else if broker_id.contains("icici") { "icici_direct".to_string() }
+            else { "zerodha".to_string() }
+        }
+    };
+
+    let python_code = match broker_type.as_str() {
+        "kotak_neo" => format!(
+            r#"
 import sys
 import json
-sys.path.insert(0, r'{scripts_dir}')
+sys.path.insert(0, r'{base_scripts_dir}/kotak')
+sys.path.insert(0, r'{base_scripts_dir}/zerodha')  # For SQLite helpers
+from kotak_api import KotakNeoAPI, load_credentials_from_db, save_token_to_db
+import pyotp
+
+try:
+    creds = load_credentials_from_db('{broker_id}')
+    if not creds:
+        print(json.dumps({{"success": False, "error": "Credentials not found"}}))
+        sys.exit(0)
+
+    # Extract mobile from totp_secret (stored as "secret|mobile")
+    totp_parts = creds.get('totp_secret', '').split('|')
+    totp_secret = totp_parts[0] if totp_parts else ''
+    mobile = totp_parts[1] if len(totp_parts) > 1 else ''
+
+    if not totp_secret or not mobile:
+        print(json.dumps({{"success": False, "error": "TOTP secret or mobile not configured"}}))
+        sys.exit(0)
+
+    api = KotakNeoAPI(
+        consumer_key=creds['consumer_key'],
+        consumer_secret=creds.get('consumer_secret')
+    )
+    api.initialize()
+
+    # Generate TOTP
+    totp = pyotp.TOTP(totp_secret).now()
+
+    result = api.login_with_totp(
+        mobile_number=mobile,
+        user_id=creds['user_id'],
+        totp=totp,
+        mpin=creds['mpin']
+    )
+
+    if result['success']:
+        import datetime
+        now = datetime.datetime.now()
+        tomorrow = now + datetime.timedelta(days=1)
+        expiry_dt = tomorrow.replace(hour=3, minute=30, second=0, microsecond=0)
+        expiry_ts = int(expiry_dt.timestamp())
+
+        save_token_to_db('{broker_id}', result['access_token'], result.get('session_token', ''), expiry_ts)
+        print(json.dumps({{"success": True, "accessToken": result['access_token'], "expiry": expiry_ts}}))
+    else:
+        print(json.dumps({{"success": False, "error": result.get('error', 'Login failed')}}))
+
+except Exception as e:
+    import traceback
+    print(json.dumps({{"success": False, "error": str(e), "trace": traceback.format_exc()}}))
+"#,
+            base_scripts_dir = base_scripts_dir,
+            broker_id = broker_id
+        ),
+        "icici_direct" => format!(
+            r#"
+import sys
+import json
+sys.path.insert(0, r'{base_scripts_dir}/icici')
+from auto_login import refresh_session
+
+try:
+    # Use the Selenium auto-login to get session token
+    result = refresh_session('{broker_id}', headless=True)
+    print(json.dumps(result))
+
+except Exception as e:
+    import traceback
+    print(json.dumps({{"success": False, "error": str(e), "trace": traceback.format_exc()}}))
+"#,
+            base_scripts_dir = base_scripts_dir,
+            broker_id = broker_id
+        ),
+        _ => format!(
+            r#"
+import sys
+import json
+sys.path.insert(0, r'{base_scripts_dir}/zerodha')
 from auto_login import ZerodhaAutoLogin, load_credentials_from_db, save_token_to_db
 
 try:
@@ -1238,10 +1610,11 @@ except Exception as e:
     import traceback
     print(json.dumps({{"success": False, "error": str(e), "trace": traceback.format_exc()}}))
 "#,
-        scripts_dir = scripts_dir,
-        broker_id = broker_id,
-        force_flag = force_flag
-    );
+            base_scripts_dir = base_scripts_dir,
+            broker_id = broker_id,
+            force_flag = force_flag
+        ),
+    };
 
     let output = Command::new("python")
         .arg("-c")
